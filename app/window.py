@@ -5,6 +5,7 @@ Ventana principal de la aplicación — Ethernet Signal Analyzer.
 import os
 import sys
 import json
+import shutil
 import datetime
 
 import matplotlib
@@ -570,18 +571,17 @@ class MainWindow(QMainWindow):
         return f"{sid[0]}|{sid[1]}|{sid[2]}|{sid[3]}"
 
     def _find_tshark(self):
-        exe_dir = os.path.dirname(sys.executable)
-        local = os.path.join(exe_dir, "tshark.exe")
-        if os.path.exists(local):
-            return local
         for candidate in [
+            os.path.join(os.path.dirname(sys.executable), "tshark.exe"),
             r"C:\Program Files\Wireshark\tshark.exe",
             r"C:\Program Files (x86)\Wireshark\tshark.exe",
-            "tshark",
+            "/usr/bin/tshark",
+            "/usr/local/bin/tshark",
+            "/opt/homebrew/bin/tshark",
         ]:
-            if os.path.exists(candidate):
+            if os.path.isfile(candidate):
                 return candidate
-        return "tshark"
+        return shutil.which("tshark") or "tshark"
 
     def _browse_pcap(self):
         p, _ = QFileDialog.getOpenFileName(
