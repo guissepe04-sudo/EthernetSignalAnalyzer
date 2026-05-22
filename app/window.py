@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self._favorites   = self._load_favorites()
 
         self._build_ui()
+        self._check_tshark()
         self._cursor_vline    = None
         self._cursor_hline    = None
         self._cursor_annot    = None
@@ -582,6 +583,23 @@ class MainWindow(QMainWindow):
             if os.path.isfile(candidate):
                 return candidate
         return shutil.which("tshark") or "tshark"
+
+    def _check_tshark(self):
+        import subprocess, platform
+        try:
+            subprocess.run([self._tshark, "--version"],
+                           capture_output=True, timeout=5)
+        except FileNotFoundError:
+            if platform.system() == "Linux":
+                hint = "Instalar con:\n  sudo apt install tshark\n\nO verificar con:  which tshark"
+            elif platform.system() == "Darwin":
+                hint = "Instalar con:\n  brew install wireshark"
+            else:
+                hint = "Descarga: https://www.wireshark.org/download.html"
+            QMessageBox.critical(
+                self, "tshark no encontrado",
+                f"No se encontró tshark en: {self._tshark}\n\n{hint}"
+            )
 
     def _browse_pcap(self):
         p, _ = QFileDialog.getOpenFileName(
