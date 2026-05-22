@@ -112,9 +112,14 @@ def get_interfaces(tshark_bin: str) -> list:
         return []
 
 
-def start_live_capture(tshark_bin: str, interface: str) -> subprocess.Popen:
-    cmd = [tshark_bin, "-i", interface,
-           "-Y", "tcp.payload or udp.payload",
+def start_live_capture(tshark_bin: str, interface: str,
+                        src_ip: str = "", dst_ip: str = "") -> subprocess.Popen:
+    y = "tcp.payload or udp.payload"
+    if src_ip:
+        y += f" and ip.src == {src_ip}"
+    if dst_ip:
+        y += f" and ip.dst == {dst_ip}"
+    cmd = [tshark_bin, "-i", interface, "-Y", y,
            "-T", "fields", "-l"] + _TSHARK_FIELD_ARGS
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace", bufsize=1)

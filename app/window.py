@@ -154,13 +154,23 @@ class MainWindow(QMainWindow):
         row2.setSpacing(6)
         row2.addWidget(self._lbl("EN VIVO:"))
         self._iface_combo = QComboBox()
-        self._iface_combo.setMinimumWidth(140)
+        self._iface_combo.setMinimumWidth(130)
         self._load_interfaces()
         row2.addWidget(self._iface_combo)
-        row2.addWidget(self._lbl_small("ID señal (hex):"))
+        row2.addWidget(self._lbl_small("IP origen:"))
+        self._live_src_edit = QLineEdit()
+        self._live_src_edit.setPlaceholderText("(todas)")
+        self._live_src_edit.setFixedWidth(110)
+        row2.addWidget(self._live_src_edit)
+        row2.addWidget(self._lbl_small("IP destino:"))
+        self._live_dst_edit = QLineEdit()
+        self._live_dst_edit.setPlaceholderText("(todas)")
+        self._live_dst_edit.setFixedWidth(110)
+        row2.addWidget(self._live_dst_edit)
+        row2.addWidget(self._lbl_small("ID (hex):"))
         self._live_id_edit = QLineEdit()
         self._live_id_edit.setPlaceholderText("ej: 006D")
-        self._live_id_edit.setFixedWidth(90)
+        self._live_id_edit.setFixedWidth(80)
         row2.addWidget(self._live_id_edit)
         self._btn_live_start = QPushButton("Iniciar")
         self._btn_live_start.setObjectName("accent")
@@ -630,7 +640,9 @@ class MainWindow(QMainWindow):
         self._iface_combo.addItems(ifaces if ifaces else ["(sin interfaces)"])
 
     def _start_live(self):
-        iface = self._iface_combo.currentText()
+        iface   = self._iface_combo.currentText()
+        src_ip  = self._live_src_edit.text().strip()
+        dst_ip  = self._live_dst_edit.text().strip()
         hex_str = self._live_id_edit.text().strip().replace("0x", "").replace("0X", "")
         try:
             target_id = int(hex_str, 16)
@@ -638,13 +650,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "ID invalido",
                                 "Ingresa el ID de senal en hexadecimal (ej: 006D)")
             return
+
         self._live_ts        = []
         self._live_val       = []
         self._live_target_id = target_id
         self._live_t0        = 0.0
 
         self._live_thread = QThread()
-        self._live_worker = LiveCaptureWorker(self._tshark, iface)
+        self._live_worker = LiveCaptureWorker(self._tshark, iface, src_ip, dst_ip)
         self._live_worker.moveToThread(self._live_thread)
         self._live_thread.started.connect(self._live_worker.run)
         self._live_worker.new_packet.connect(self._on_live_packet)
@@ -660,7 +673,11 @@ class MainWindow(QMainWindow):
         self._btn_live_start.setEnabled(False)
         self._btn_live_stop.setEnabled(True)
         self._set_view("live")
-        self._set_status(f"Capturando en {iface} — senal 0x{target_id:04X}")
+        src_lbl = src_ip or "todas"
+        dst_lbl = dst_ip or "todas"
+        self._set_status(
+            f"Capturando en {iface}  |  {src_lbl} → {dst_lbl}  |  senal 0x{target_id:04X}"
+        )
 
     def _stop_live(self):
         if self._live_timer:
