@@ -22,13 +22,13 @@ from PyQt6.QtWidgets import (
     QStatusBar, QProgressBar, QFileDialog, QMessageBox,
     QButtonGroup, QFrame, QDoubleSpinBox, QTimeEdit,
 )
-from PyQt6.QtCore import Qt, QThread, QTime
+from PyQt6.QtCore import Qt, QThread, QTime, QTimer
 from PyQt6.QtGui import QColor, QFont, QBrush
 
 from .styles import QSS, C_BG, C_CARD, C_TEXT, C_HDR, C_SUB, C_BORDER, C_SURF, TYPE_STYLE
 from .analysis import sig_type, find_duplicate_groups
-from .plots import (draw_empty, draw_individual, draw_overview, draw_compare)
-from .workers import AnalysisWorker
+from .plots import (draw_empty, draw_individual, draw_overview, draw_compare, draw_live)
+from .workers import AnalysisWorker, LiveCaptureWorker
 
 # Columnas del árbol de señales
 _TREE_COLS    = ["★", "Nombre", "ID Hex", "Tipo", "Proto", "Origen", "Destino", "Max", "s", "N"]
@@ -41,6 +41,7 @@ _C_FAV_FG = "#f0c040"
 # Archivo donde se guardan los favoritos (junto a window.py → raíz del proyecto)
 _FAVORITES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "favorites.json")
+_LIVE_BUFFER = 500
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +60,13 @@ class MainWindow(QMainWindow):
         self._view        = "overview"
         self._tshark      = self._find_tshark()
         self._thread = self._worker = None
+        self._live_thread    = None
+        self._live_worker    = None
+        self._live_timer     = None
+        self._live_ts        = []
+        self._live_val       = []
+        self._live_target_id = None
+        self._live_t0        = 0.0
         self._favorites   = self._load_favorites()
 
         self._build_ui()
@@ -116,25 +124,55 @@ class MainWindow(QMainWindow):
     def _build_topbar(self):
         bar = QFrame()
         bar.setObjectName("topbar")
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(12, 7, 12, 7)
-        lay.setSpacing(6)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(12, 7, 12, 7)
+        outer.setSpacing(5)
 
-        lay.addWidget(self._lbl("PCAP:"))
+        # ── Fila 1: análisis PCAP ─────────────────────────────────────────────
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        row1.addWidget(self._lbl("PCAP:"))
         self._pcap_edit = QLineEdit()
         self._pcap_edit.setPlaceholderText("Ruta al archivo .pcap...")
         self._pcap_edit.setMinimumWidth(300)
-        lay.addWidget(self._pcap_edit, 2)
+        row1.addWidget(self._pcap_edit, 2)
         b1 = QPushButton("Examinar")
         b1.clicked.connect(self._browse_pcap)
-        lay.addWidget(b1)
-
-        lay.addSpacing(8)
+        row1.addWidget(b1)
+        row1.addSpacing(8)
         self._btn_analyze = QPushButton("  ANALIZAR")
         self._btn_analyze.setObjectName("accent")
         self._btn_analyze.setMinimumWidth(120)
         self._btn_analyze.clicked.connect(self._on_analyze)
-        lay.addWidget(self._btn_analyze)
+        row1.addWidget(self._btn_analyze)
+        outer.addLayout(row1)
+
+        outer.addWidget(self._sep())
+
+        # ── Fila 2: captura en vivo ───────────────────────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(self._lbl("EN VIVO:"))
+        self._iface_combo = QComboBox()
+        self._iface_combo.setMinimumWidth(140)
+        self._load_interfaces()
+        row2.addWidget(self._iface_combo)
+        row2.addWidget(self._lbl_small("ID señal (hex):"))
+        self._live_id_edit = QLineEdit()
+        self._live_id_edit.setPlaceholderText("ej: 006D")
+        self._live_id_edit.setFixedWidth(90)
+        row2.addWidget(self._live_id_edit)
+        self._btn_live_start = QPushButton("Iniciar")
+        self._btn_live_start.setObjectName("accent")
+        self._btn_live_start.clicked.connect(self._start_live)
+        row2.addWidget(self._btn_live_start)
+        self._btn_live_stop = QPushButton("Detener")
+        self._btn_live_stop.clicked.connect(self._stop_live)
+        self._btn_live_stop.setEnabled(False)
+        row2.addWidget(self._btn_live_stop)
+        row2.addStretch()
+        outer.addLayout(row2)
+
         return bar
 
     def _build_left(self):
@@ -238,7 +276,8 @@ class MainWindow(QMainWindow):
         self._view_group.setExclusive(True)
         self._view_btns = {}
         for mode, lbl in [("overview", "Panoramica"),
-                           ("individual", "Individual"), ("compare", "Comparar")]:
+                           ("individual", "Individual"), ("compare", "Comparar"),
+                           ("live", "En Vivo")]:
             btn = QPushButton(lbl)
             btn.setObjectName("view")
             btn.setCheckable(True)
@@ -584,6 +623,86 @@ class MainWindow(QMainWindow):
                 return candidate
         return shutil.which("tshark") or "tshark"
 
+    def _load_interfaces(self):
+        from .tshark import get_interfaces
+        ifaces = get_interfaces(self._tshark)
+        self._iface_combo.clear()
+        self._iface_combo.addItems(ifaces if ifaces else ["(sin interfaces)"])
+
+    def _start_live(self):
+        iface = self._iface_combo.currentText()
+        hex_str = self._live_id_edit.text().strip().replace("0x", "").replace("0X", "")
+        try:
+            target_id = int(hex_str, 16)
+        except ValueError:
+            QMessageBox.warning(self, "ID invalido",
+                                "Ingresa el ID de senal en hexadecimal (ej: 006D)")
+            return
+        self._live_ts        = []
+        self._live_val       = []
+        self._live_target_id = target_id
+        self._live_t0        = 0.0
+
+        self._live_thread = QThread()
+        self._live_worker = LiveCaptureWorker(self._tshark, iface)
+        self._live_worker.moveToThread(self._live_thread)
+        self._live_thread.started.connect(self._live_worker.run)
+        self._live_worker.new_packet.connect(self._on_live_packet)
+        self._live_worker.error.connect(self._on_live_error)
+        self._live_worker.error.connect(self._live_thread.quit)
+        self._live_thread.start()
+
+        self._live_timer = QTimer()
+        self._live_timer.setInterval(500)
+        self._live_timer.timeout.connect(self._update_live_plot)
+        self._live_timer.start()
+
+        self._btn_live_start.setEnabled(False)
+        self._btn_live_stop.setEnabled(True)
+        self._set_view("live")
+        self._set_status(f"Capturando en {iface} — senal 0x{target_id:04X}")
+
+    def _stop_live(self):
+        if self._live_timer:
+            self._live_timer.stop()
+            self._live_timer = None
+        if self._live_worker:
+            self._live_worker.stop()
+            self._live_worker = None
+        if self._live_thread:
+            self._live_thread.quit()
+            self._live_thread.wait(3000)
+            self._live_thread = None
+        self._btn_live_start.setEnabled(True)
+        self._btn_live_stop.setEnabled(False)
+        n = len(self._live_ts)
+        tid = self._live_target_id or 0
+        self._set_status(f"Captura detenida — {n} muestras de senal 0x{tid:04X}")
+
+    def _on_live_packet(self, pkt):
+        from .parser import parse_raw_packet
+        _, entries = parse_raw_packet(pkt["payload"])
+        for sig_id, val, is_f, cat in entries:
+            if sig_id == self._live_target_id:
+                if not self._live_ts:
+                    self._live_t0 = pkt["ts"]
+                self._live_ts.append(pkt["ts"])
+                self._live_val.append(val)
+        if len(self._live_ts) > _LIVE_BUFFER:
+            excess = len(self._live_ts) - _LIVE_BUFFER
+            self._live_ts  = self._live_ts[excess:]
+            self._live_val = self._live_val[excess:]
+
+    def _on_live_error(self, msg):
+        self._stop_live()
+        QMessageBox.critical(self, "Error en captura en vivo", msg)
+
+    def _update_live_plot(self):
+        if self._view == "live":
+            draw_live(self._fig, self._live_ts, self._live_val,
+                      self._live_target_id or 0, self._live_t0)
+            self._canvas.draw()
+
     def _check_tshark(self):
         import subprocess, platform
         try:
@@ -643,6 +762,9 @@ class MainWindow(QMainWindow):
                 draw_empty(self._fig, "Haz clic en una senal de la lista para verla aqui.")
         elif m == "compare":
             draw_compare(self._fig, self._compare_ids, self._signals, self._t0)
+        elif m == "live":
+            draw_live(self._fig, self._live_ts, self._live_val,
+                      self._live_target_id or 0, self._live_t0)
         self._ind_controls.setVisible(m == "individual")
         self._canvas.draw()
 

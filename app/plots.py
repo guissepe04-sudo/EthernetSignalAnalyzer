@@ -196,3 +196,29 @@ def draw_compare(fig, sel_ids: list, signals: dict, t0: float = 0.0):
     fig.tight_layout(pad=2)
 
 
+def draw_live(fig, ts: list, vals: list, signal_id: int, t0: float = 0.0):
+    fig.clear()
+    _style_fig(fig)
+    ax = fig.add_subplot(111)
+    _style_ax(ax)
+    if not ts:
+        ax.text(0.5, 0.5,
+                "Esperando datos...\nInicia la captura y espera paquetes de la senal.",
+                ha="center", va="center", fontsize=13, color=C_SUB,
+                transform=ax.transAxes, style="italic")
+        ax.axis("off")
+        return
+    t_arr = np.array(ts) - t0
+    v_arr = np.array(vals, dtype=float)
+    ax.plot(t_arr, v_arr, "-", lw=1.5, color=C_TEXT, alpha=0.9)
+    ax.plot(t_arr[-1:], v_arr[-1:], "o", ms=7, color="#ff6b6b", zorder=10)
+    ax.set_title(
+        f"EN VIVO — Senal 0x{signal_id:04X} ({signal_id})   N={len(ts)}",
+        fontsize=11, fontweight="bold", color=C_TEXT, pad=14
+    )
+    ax.set_xlabel("Tiempo (s)", fontsize=11)
+    ax.set_ylabel("Valor", fontsize=11)
+    ax.grid(True, alpha=0.25, linestyle="--", color=C_GRID)
+    fig.tight_layout(pad=2.5)
+
+
