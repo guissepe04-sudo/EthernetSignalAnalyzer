@@ -26,6 +26,12 @@ class AnalysisWorker(QObject):
     def run(self):
         try:
             pkts = run_tshark(self._tshark, self._pcap)
+            if not pkts:
+                self.error.emit(
+                    "tshark no encontro paquetes con payload TCP/UDP en el archivo.\n"
+                    "Verificar que el archivo .pcap sea valido y contenga trafico."
+                )
+                return
             self.progress.emit(f"{len(pkts)} paquetes extraidos. Analizando senales...")
             sigs  = analyze_signals(pkts, self._proto, self._src, self._dst)
             all_t = [t for v in sigs.values() for t in v["ts"]]
