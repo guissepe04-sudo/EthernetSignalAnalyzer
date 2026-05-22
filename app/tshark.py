@@ -66,6 +66,9 @@ def run_tshark(tshark_bin: str, pcap_path: str) -> list:
             "payload":   payload,
         })
     proc.wait()
+    if proc.returncode != 0:
+        stderr = proc.stderr.read().strip()
+        raise RuntimeError(f"tshark termino con error (codigo {proc.returncode}):\n{stderr}")
     return packets
 
 
