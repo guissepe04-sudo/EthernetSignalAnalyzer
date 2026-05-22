@@ -1,0 +1,11 @@
+.venv/
+.claude/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.log
+favorites.json
+*.pcap
+*.pcapng
