@@ -41,3 +41,43 @@ class AnalysisWorker(QObject):
         except Exception as e:
             traceback.print_exc()
             self.error.emit(str(e))
+
+
+class LiveCaptureWorker(QObject):
+    new_packet = pyqtSignal(dict)
+    error      = pyqtSignal(str)
+
+    def __init__(self, tshark: str, interface: str):
+        super().__init__()
+        self._tshark    = tshark
+        self._interface = interface
+        self._proc      = None
+        self._active    = True
+
+    def run(self):
+        from .tshark import start_live_capture, _parse_tshark_line
+        try:
+            self._proc = start_live_capture(self._tshark, self._interface)
+            for raw in self._proc.stdout:
+                if not self._active:
+                    break
+                pkt = _parse_tshark_line(raw)
+                if pkt:
+                    self.new_packet.emit(pkt)
+        except Exception as e:
+            if self._active:
+                self.error.emit(str(e))
+        finally:
+            if self._proc:
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    pass
+
+    def stop(self):
+        self._active = False
+        if self._proc:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
