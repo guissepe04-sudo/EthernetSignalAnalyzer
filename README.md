@@ -12,25 +12,13 @@ Lee capturas de Wireshark, decodifica dos protocolos propietarios binarios y vis
 
 ```bash
 python -m venv .venv
+
 # Windows:
 .venv\Scripts\activate
+
 # Linux/macOS:
 source .venv/bin/activate
 
 pip install -r requirements.txt
 python main.py
 ```
-
-## Generar ejecutable
-
-**Windows:**
-```powershell
-.\build.ps1
-```
-
-**Linux:**
-```bash
-bash build.sh
-```
-
-El binario queda en `dist/`.
