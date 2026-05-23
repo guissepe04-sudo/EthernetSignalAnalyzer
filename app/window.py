@@ -63,9 +63,8 @@ class MainWindow(QMainWindow):
         self._live_thread    = None
         self._live_worker    = None
         self._live_timer     = None
-        self._live_ts        = []
-        self._live_val       = []
-        self._live_target_id = None
+        self._live_signals   = {}
+        self._live_tcp_bufs  = {}
         self._live_t0        = 0.0
         self._favorites   = self._load_favorites()
 
@@ -154,25 +153,10 @@ class MainWindow(QMainWindow):
         row2.setSpacing(6)
         row2.addWidget(self._lbl("EN VIVO:"))
         self._iface_combo = QComboBox()
-        self._iface_combo.setMinimumWidth(130)
+        self._iface_combo.setMinimumWidth(160)
         self._load_interfaces()
         row2.addWidget(self._iface_combo)
-        row2.addWidget(self._lbl_small("IP origen:"))
-        self._live_src_edit = QLineEdit()
-        self._live_src_edit.setPlaceholderText("(todas)")
-        self._live_src_edit.setFixedWidth(110)
-        row2.addWidget(self._live_src_edit)
-        row2.addWidget(self._lbl_small("IP destino:"))
-        self._live_dst_edit = QLineEdit()
-        self._live_dst_edit.setPlaceholderText("(todas)")
-        self._live_dst_edit.setFixedWidth(110)
-        row2.addWidget(self._live_dst_edit)
-        row2.addWidget(self._lbl_small("ID (hex):"))
-        self._live_id_edit = QLineEdit()
-        self._live_id_edit.setPlaceholderText("ej: 006D")
-        self._live_id_edit.setFixedWidth(80)
-        row2.addWidget(self._live_id_edit)
-        self._btn_live_start = QPushButton("Iniciar")
+        self._btn_live_start = QPushButton("Iniciar captura")
         self._btn_live_start.setObjectName("accent")
         self._btn_live_start.clicked.connect(self._start_live)
         row2.addWidget(self._btn_live_start)
@@ -180,6 +164,9 @@ class MainWindow(QMainWindow):
         self._btn_live_stop.clicked.connect(self._stop_live)
         self._btn_live_stop.setEnabled(False)
         row2.addWidget(self._btn_live_stop)
+        self._live_status_lbl = QLabel("")
+        self._live_status_lbl.setObjectName("subtext")
+        row2.addWidget(self._live_status_lbl)
         row2.addStretch()
         outer.addLayout(row2)
 
@@ -640,24 +627,13 @@ class MainWindow(QMainWindow):
         self._iface_combo.addItems(ifaces if ifaces else ["(sin interfaces)"])
 
     def _start_live(self):
-        iface   = self._iface_combo.currentText()
-        src_ip  = self._live_src_edit.text().strip()
-        dst_ip  = self._live_dst_edit.text().strip()
-        hex_str = self._live_id_edit.text().strip().replace("0x", "").replace("0X", "")
-        try:
-            target_id = int(hex_str, 16)
-        except ValueError:
-            QMessageBox.warning(self, "ID invalido",
-                                "Ingresa el ID de senal en hexadecimal (ej: 006D)")
-            return
-
-        self._live_ts        = []
-        self._live_val       = []
-        self._live_target_id = target_id
-        self._live_t0        = 0.0
+        iface = self._iface_combo.currentText()
+        self._live_signals  = {}
+        self._live_tcp_bufs = {}
+        self._live_t0       = 0.0
 
         self._live_thread = QThread()
-        self._live_worker = LiveCaptureWorker(self._tshark, iface, src_ip, dst_ip)
+        self._live_worker = LiveCaptureWorker(self._tshark, iface)
         self._live_worker.moveToThread(self._live_thread)
         self._live_thread.started.connect(self._live_worker.run)
         self._live_worker.new_packet.connect(self._on_live_packet)
@@ -673,11 +649,7 @@ class MainWindow(QMainWindow):
         self._btn_live_start.setEnabled(False)
         self._btn_live_stop.setEnabled(True)
         self._set_view("live")
-        src_lbl = src_ip or "todas"
-        dst_lbl = dst_ip or "todas"
-        self._set_status(
-            f"Capturando en {iface}  |  {src_lbl} → {dst_lbl}  |  senal 0x{target_id:04X}"
-        )
+        self._set_status(f"Capturando en {iface}...")
 
     def _stop_live(self):
         if self._live_timer:
@@ -692,33 +664,75 @@ class MainWindow(QMainWindow):
             self._live_thread = None
         self._btn_live_start.setEnabled(True)
         self._btn_live_stop.setEnabled(False)
-        n = len(self._live_ts)
-        tid = self._live_target_id or 0
-        self._set_status(f"Captura detenida — {n} muestras de senal 0x{tid:04X}")
+        self._live_status_lbl.setText("")
+        n_sig = len(self._live_signals)
+        n_pts = sum(v["n"] for v in self._live_signals.values())
+        self._set_status(f"Captura detenida — {n_sig} senales, {n_pts} muestras")
 
     def _on_live_packet(self, pkt):
-        from .parser import parse_raw_packet
-        _, entries = parse_raw_packet(pkt["payload"])
-        for sig_id, val, is_f, cat in entries:
-            if sig_id == self._live_target_id:
-                if not self._live_ts:
-                    self._live_t0 = pkt["ts"]
-                self._live_ts.append(pkt["ts"])
-                self._live_val.append(val)
-        if len(self._live_ts) > _LIVE_BUFFER:
-            excess = len(self._live_ts) - _LIVE_BUFFER
-            self._live_ts  = self._live_ts[excess:]
-            self._live_val = self._live_val[excess:]
+        import numpy as np
+        from .parser import parse_raw_packet, parse_tcp16_stream
+        ts = pkt["ts"]
+        if not self._live_t0:
+            self._live_t0 = ts
+
+        if pkt["transport"] == "UDP":
+            _, entries = parse_raw_packet(pkt["payload"])
+            for sig_id, val, is_f, cat in entries:
+                self._live_add(sig_id, val, is_f, cat, ts,
+                               "UDP", pkt["ip_src"], pkt["ip_dst"])
+        else:
+            stream_key = (pkt["ip_src"], pkt["ip_dst"])
+            try:
+                chunk = bytes.fromhex(pkt["payload"].replace(" ", ""))
+            except ValueError:
+                return
+            buf = self._live_tcp_bufs.get(stream_key, b"") + chunk
+            entries, buf = parse_tcp16_stream(buf)
+            self._live_tcp_bufs[stream_key] = buf
+            for sig_id, val, is_f, cat in entries:
+                self._live_add(sig_id, val, is_f, cat, ts,
+                               "TCP", pkt["ip_src"], pkt["ip_dst"])
+
+        n_sig = len(self._live_signals)
+        n_pts = sum(v["n"] for v in self._live_signals.values())
+        self._live_status_lbl.setText(f"{n_sig} senales  ·  {n_pts} muestras")
+
+    def _live_add(self, sig_id, val, is_f, cat, ts, transport, ip_src, ip_dst):
+        import numpy as np
+        key = (sig_id, transport, ip_src, ip_dst)
+        if key not in self._live_signals:
+            self._live_signals[key] = {
+                "signal_id": sig_id, "ts": [], "val": [],
+                "is_float": is_f, "cat": cat,
+                "transport": transport, "ip_src": ip_src, "ip_dst": ip_dst,
+                "min": 0.0, "max": 0.0, "std": 0.0, "range": 0.0, "n": 0,
+            }
+        info = self._live_signals[key]
+        info["ts"].append(ts)
+        info["val"].append(val)
+        info["n"] += 1
+        if len(info["ts"]) > _LIVE_BUFFER:
+            info["ts"]  = info["ts"][-_LIVE_BUFFER:]
+            info["val"] = info["val"][-_LIVE_BUFFER:]
+        arr = np.array(info["val"], dtype=float)
+        info["min"]   = float(arr.min())
+        info["max"]   = float(arr.max())
+        info["std"]   = float(arr.std())
+        info["range"] = float(arr.max() - arr.min())
 
     def _on_live_error(self, msg):
         self._stop_live()
         QMessageBox.critical(self, "Error en captura en vivo", msg)
 
     def _update_live_plot(self):
-        if self._view == "live":
-            draw_live(self._fig, self._live_ts, self._live_val,
-                      self._live_target_id or 0, self._live_t0)
-            self._canvas.draw()
+        if self._view != "live":
+            return
+        if self._live_signals:
+            draw_overview(self._fig, self._live_signals, self._live_t0)
+        else:
+            draw_empty(self._fig, "Esperando paquetes...")
+        self._canvas.draw()
 
     def _check_tshark(self):
         import subprocess, platform
@@ -780,8 +794,10 @@ class MainWindow(QMainWindow):
         elif m == "compare":
             draw_compare(self._fig, self._compare_ids, self._signals, self._t0)
         elif m == "live":
-            draw_live(self._fig, self._live_ts, self._live_val,
-                      self._live_target_id or 0, self._live_t0)
+            if self._live_signals:
+                draw_overview(self._fig, self._live_signals, self._live_t0)
+            else:
+                draw_empty(self._fig, "Esperando paquetes...")
         self._ind_controls.setVisible(m == "individual")
         self._canvas.draw()
 
