@@ -47,20 +47,25 @@ class LiveCaptureWorker(QObject):
     new_packet = pyqtSignal(dict)
     error      = pyqtSignal(str)
 
-    def __init__(self, tshark: str, interface: str, src_ip: str = "", dst_ip: str = ""):
+    def __init__(self, tshark: str, interface: str,
+                 src_ip: str = "", dst_ip: str = "",
+                 proto: str = "", output_pcap: str = ""):
         super().__init__()
-        self._tshark    = tshark
-        self._interface = interface
-        self._src_ip    = src_ip
-        self._dst_ip    = dst_ip
-        self._proc      = None
-        self._active    = True
+        self._tshark      = tshark
+        self._interface   = interface
+        self._src_ip      = src_ip
+        self._dst_ip      = dst_ip
+        self._proto       = proto
+        self._output_pcap = output_pcap
+        self._proc        = None
+        self._active      = True
 
     def run(self):
         from .tshark import start_live_capture, _parse_tshark_line
         try:
             self._proc = start_live_capture(self._tshark, self._interface,
-                                            self._src_ip, self._dst_ip)
+                                            self._src_ip, self._dst_ip,
+                                            self._proto, self._output_pcap)
             for raw in self._proc.stdout:
                 if not self._active:
                     break

@@ -9,3 +9,4 @@ dist/
 favorites.json
 *.pcap
 *.pcapng
+*.csv
