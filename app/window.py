@@ -16,16 +16,17 @@ from matplotlib.figure import Figure
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
-    QVBoxLayout, QHBoxLayout, QFormLayout,
+    QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QComboBox, QCheckBox,
-    QTreeWidget, QTreeWidgetItem, QPlainTextEdit,
+    QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QListWidget,
     QStatusBar, QProgressBar, QFileDialog, QMessageBox,
     QButtonGroup, QFrame, QDoubleSpinBox, QTimeEdit,
+    QWidgetAction, QInputDialog, QMenu, QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTime, QTimer
-from PyQt6.QtGui import QColor, QFont, QBrush
+from PyQt6.QtGui import QColor, QFont, QBrush, QAction
 
-from .styles import QSS, C_BG, C_CARD, C_TEXT, C_HDR, C_SUB, C_BORDER, C_SURF, TYPE_STYLE
+from .styles import QSS, C_BG, C_CARD, C_TEXT, C_HDR, C_SUB, C_BORDER, C_SURF, C_INPUT, TYPE_STYLE
 from .analysis import sig_type, find_duplicate_groups
 from .plots import (draw_empty, draw_individual, draw_overview, draw_compare, draw_live)
 from .workers import AnalysisWorker, LiveCaptureWorker
@@ -60,12 +61,14 @@ class MainWindow(QMainWindow):
         self._view        = "overview"
         self._tshark      = self._find_tshark()
         self._thread = self._worker = None
-        self._live_thread    = None
-        self._live_worker    = None
-        self._live_timer     = None
-        self._live_signals   = {}
-        self._live_tcp_bufs  = {}
-        self._live_t0        = 0.0
+        self._live_thread      = None
+        self._live_worker      = None
+        self._live_timer       = None
+        self._live_signals     = {}
+        self._live_tcp_bufs    = {}
+        self._live_t0          = 0.0
+        self._live_raw_packets = []
+        self._packets     = []
         self._favorites   = self._load_favorites()
 
         self._build_ui()
@@ -86,7 +89,7 @@ class MainWindow(QMainWindow):
         self._canvas.mpl_connect('button_press_event',   self._on_mouse_press)
         self._canvas.mpl_connect('button_release_event', self._on_mouse_release)
         self._canvas.mpl_connect('scroll_event',         self._on_scroll)
-        draw_empty(self._fig, "Carga un .pcap y presiona ANALIZAR para comenzar.")
+        draw_empty(self._fig, "Usa  Archivo → Abrir y analizar PCAP  para comenzar.")
         self._canvas.draw()
 
     # ── Construcción de la UI ─────────────────────────────────────────────────
@@ -97,7 +100,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(root_w)
         root.setContentsMargins(8, 6, 8, 4)
         root.setSpacing(5)
-        root.addWidget(self._build_topbar())
+        self._build_menus()
 
         spl = QSplitter(Qt.Orientation.Horizontal)
         spl.setHandleWidth(2)
@@ -110,7 +113,7 @@ class MainWindow(QMainWindow):
 
         sb = QStatusBar()
         self.setStatusBar(sb)
-        self._status_lbl = QLabel("Listo. Carga un .pcap para comenzar.")
+        self._status_lbl = QLabel("Listo. Usa  Archivo → Abrir y analizar PCAP  para comenzar.")
         self._status_lbl.setObjectName("subtext")
         sb.addWidget(self._status_lbl, 1)
         self._progress = QProgressBar()
@@ -120,57 +123,93 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(False)
         sb.addPermanentWidget(self._progress)
 
-    def _build_topbar(self):
-        bar = QFrame()
-        bar.setObjectName("topbar")
-        outer = QVBoxLayout(bar)
-        outer.setContentsMargins(12, 7, 12, 7)
-        outer.setSpacing(5)
+    def _build_menus(self):
+        mb = self.menuBar()
 
-        # ── Fila 1: análisis PCAP ─────────────────────────────────────────────
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        row1.addWidget(self._lbl("PCAP:"))
-        self._pcap_edit = QLineEdit()
-        self._pcap_edit.setPlaceholderText("Ruta al archivo .pcap...")
-        self._pcap_edit.setMinimumWidth(300)
-        row1.addWidget(self._pcap_edit, 2)
-        b1 = QPushButton("Examinar")
-        b1.clicked.connect(self._browse_pcap)
-        row1.addWidget(b1)
-        row1.addSpacing(8)
-        self._btn_analyze = QPushButton("  ANALIZAR")
-        self._btn_analyze.setObjectName("accent")
-        self._btn_analyze.setMinimumWidth(120)
-        self._btn_analyze.clicked.connect(self._on_analyze)
-        row1.addWidget(self._btn_analyze)
-        outer.addLayout(row1)
+        # ── Archivo ───────────────────────────────────────────────────────────
+        m_file = mb.addMenu("Archivo")
 
-        outer.addWidget(self._sep())
+        self._act_open_analyze = QAction("Abrir y analizar PCAP...", self)
+        self._act_open_analyze.setShortcut("Ctrl+O")
+        self._act_open_analyze.triggered.connect(self._menu_open_analyze)
+        m_file.addAction(self._act_open_analyze)
 
-        # ── Fila 2: captura en vivo ───────────────────────────────────────────
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        row2.addWidget(self._lbl("EN VIVO:"))
+        self._act_export_csv = QAction("Exportar señal seleccionada a CSV...", self)
+        self._act_export_csv.setShortcut("Ctrl+E")
+        self._act_export_csv.setEnabled(False)
+        self._act_export_csv.triggered.connect(self._export_signal_csv)
+        m_file.addAction(self._act_export_csv)
+
+        self._act_export_visible = QAction("Exportar señales visibles a CSV...", self)
+        self._act_export_visible.setEnabled(False)
+        self._act_export_visible.triggered.connect(self._export_signals_visible_csv)
+        m_file.addAction(self._act_export_visible)
+
+        self._act_export_pkts = QAction("Exportar paquetes a CSV...", self)
+        self._act_export_pkts.setEnabled(False)
+        self._act_export_pkts.triggered.connect(self._export_packets_csv)
+        m_file.addAction(self._act_export_pkts)
+
+        m_file.addSeparator()
+
+        act_import_names = QAction("Importar nombres .config...", self)
+        act_import_names.triggered.connect(self._import_names)
+        m_file.addAction(act_import_names)
+
+        act_export_names = QAction("Exportar nombres .config...", self)
+        act_export_names.triggered.connect(self._export_names)
+        m_file.addAction(act_export_names)
+
+        m_file.addSeparator()
+
+        act_quit = QAction("Salir", self)
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(self.close)
+        m_file.addAction(act_quit)
+
+        # ── Captura en vivo ───────────────────────────────────────────────────
+        m_live = mb.addMenu("Captura en vivo")
+
+        iface_widget = QWidget()
+        iface_lay = QHBoxLayout(iface_widget)
+        iface_lay.setContentsMargins(8, 4, 8, 4)
+        iface_lay.setSpacing(6)
+        iface_lay.addWidget(QLabel("Interfaz:"))
         self._iface_combo = QComboBox()
-        self._iface_combo.setMinimumWidth(160)
+        self._iface_combo.setMinimumWidth(200)
         self._load_interfaces()
-        row2.addWidget(self._iface_combo)
-        self._btn_live_start = QPushButton("Iniciar captura")
-        self._btn_live_start.setObjectName("accent")
-        self._btn_live_start.clicked.connect(self._start_live)
-        row2.addWidget(self._btn_live_start)
-        self._btn_live_stop = QPushButton("Detener")
-        self._btn_live_stop.clicked.connect(self._stop_live)
-        self._btn_live_stop.setEnabled(False)
-        row2.addWidget(self._btn_live_stop)
-        self._live_status_lbl = QLabel("")
-        self._live_status_lbl.setObjectName("subtext")
-        row2.addWidget(self._live_status_lbl)
-        row2.addStretch()
-        outer.addLayout(row2)
+        iface_lay.addWidget(self._iface_combo)
+        iface_action = QWidgetAction(self)
+        iface_action.setDefaultWidget(iface_widget)
+        m_live.addAction(iface_action)
 
-        return bar
+        m_live.addSeparator()
+
+        self._act_live_start = QAction("Iniciar captura", self)
+        self._act_live_start.setShortcut("Ctrl+R")
+        self._act_live_start.triggered.connect(self._start_live)
+        m_live.addAction(self._act_live_start)
+
+        self._act_live_stop = QAction("Detener captura", self)
+        self._act_live_stop.setEnabled(False)
+        self._act_live_stop.triggered.connect(self._stop_live)
+        m_live.addAction(self._act_live_stop)
+
+        m_live.addSeparator()
+
+        act_clear = QAction("Limpiar datos capturados", self)
+        act_clear.triggered.connect(self._clear_live_data)
+        m_live.addAction(act_clear)
+
+        act_save_pcap = QAction("Guardar PCAP...", self)
+        act_save_pcap.triggered.connect(self._save_live_pcap)
+        m_live.addAction(act_save_pcap)
+
+    def _menu_open_analyze(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Selecciona PCAP", "", "PCAP (*.pcap *.pcapng);;Todos (*.*)")
+        if p:
+            self._start_analyze(p)
 
     def _build_left(self):
         frame = QFrame()
@@ -181,34 +220,47 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(5)
 
-        lay.addWidget(self._lbl("FILTROS"))
-        form = QFormLayout()
-        form.setSpacing(4)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(self._lbl("SENALES"))
+
+        # ── Fila de filtros: proto + IPs ──────────────────────────────────────
+        frow = QHBoxLayout()
+        frow.setSpacing(4)
         self._proto_combo = QComboBox()
         self._proto_combo.addItems(["Todos", "UDP", "TCP"])
-        form.addRow("Protocolo:", self._proto_combo)
+        self._proto_combo.setFixedWidth(68)
+        self._proto_combo.setToolTip("Filtrar por protocolo")
+        self._proto_combo.currentTextChanged.connect(self._populate_tree)
+        frow.addWidget(self._proto_combo)
+        frow.addWidget(self._lbl_small("Orig:"))
         self._src_combo = QComboBox()
         self._src_combo.setEditable(True)
         self._src_combo.addItem("(todas)")
-        form.addRow("IP origen:", self._src_combo)
+        self._src_combo.setToolTip("Filtrar por IP de origen")
+        self._src_combo.currentTextChanged.connect(self._populate_tree)
+        frow.addWidget(self._src_combo, 1)
+        frow.addWidget(self._lbl_small("→"))
         self._dst_combo = QComboBox()
         self._dst_combo.setEditable(True)
         self._dst_combo.addItem("(todas)")
-        form.addRow("IP destino:", self._dst_combo)
-        lay.addLayout(form)
+        self._dst_combo.setToolTip("Filtrar por IP de destino")
+        self._dst_combo.currentTextChanged.connect(self._populate_tree)
+        frow.addWidget(self._dst_combo, 1)
+        lay.addLayout(frow)
 
-        self._only_var = QCheckBox("Solo con variacion")
-        self._only_var.stateChanged.connect(self._populate_tree)
-        lay.addWidget(self._only_var)
-
-        lay.addWidget(self._sep())
-        lay.addWidget(self._lbl("SENALES"))
+        # ── Busqueda + checkbox ───────────────────────────────────────────────
+        srow = QHBoxLayout()
+        srow.setSpacing(5)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Buscar por ID hex, tipo, IP...")
+        self._search.setPlaceholderText("Buscar ID hex, IP, tipo...")
         self._search.textChanged.connect(self._populate_tree)
-        lay.addWidget(self._search)
+        srow.addWidget(self._search, 1)
+        self._only_var = QCheckBox("Solo variables")
+        self._only_var.setToolTip("Mostrar solo señales que cambian de valor")
+        self._only_var.stateChanged.connect(self._populate_tree)
+        srow.addWidget(self._only_var)
+        lay.addLayout(srow)
 
+        # ── Árbol ─────────────────────────────────────────────────────────────
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(_TREE_COLS))
         self._tree.setHeaderLabels(_TREE_COLS)
@@ -216,44 +268,36 @@ class MainWindow(QMainWindow):
         self._tree.setSortingEnabled(True)
         self._tree.setRootIsDecorated(False)
         self._tree.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         for i, w in enumerate(_TREE_WIDTHS):
             self._tree.setColumnWidth(i, w)
         self._tree.itemClicked.connect(self._on_item_click)
         self._tree.currentItemChanged.connect(self._on_current_changed)
         lay.addWidget(self._tree, 1)
 
+        # ── Detalle ───────────────────────────────────────────────────────────
         lay.addWidget(self._sep())
         lay.addWidget(self._lbl("DETALLE"))
         self._detail = QPlainTextEdit()
         self._detail.setReadOnly(True)
-        self._detail.setMaximumHeight(160)
+        self._detail.setMaximumHeight(148)
         self._detail.setFont(QFont("Consolas", 9))
         lay.addWidget(self._detail)
 
-        self._note_frame = self._build_note_editor()
-        self._note_frame.setVisible(False)
-        lay.addWidget(self._note_frame)
-
+        # ── Comparar ──────────────────────────────────────────────────────────
         lay.addWidget(self._sep())
+        cmp_row = QHBoxLayout()
+        cmp_row.setSpacing(6)
         self._cmp_lbl = QLabel("Comparando: ninguna")
         self._cmp_lbl.setObjectName("subtext")
-        lay.addWidget(self._cmp_lbl)
-        btn_clr = QPushButton("Limpiar comparacion")
+        cmp_row.addWidget(self._cmp_lbl, 1)
+        btn_clr = QPushButton("Limpiar")
+        btn_clr.setFixedWidth(68)
+        btn_clr.setToolTip("Limpiar lista de comparacion")
         btn_clr.clicked.connect(self._clear_compare)
-        lay.addWidget(btn_clr)
-
-        lay.addWidget(self._sep())
-        lay.addWidget(self._lbl("NOMBRES DE SENALES"))
-        row_cfg = QHBoxLayout()
-        btn_exp = QPushButton("Exportar .config")
-        btn_exp.setToolTip("Guarda todos los nombres y notas en un archivo .config")
-        btn_exp.clicked.connect(self._export_names)
-        row_cfg.addWidget(btn_exp)
-        btn_imp = QPushButton("Importar .config")
-        btn_imp.setToolTip("Carga nombres y notas desde un archivo .config")
-        btn_imp.clicked.connect(self._import_names)
-        row_cfg.addWidget(btn_imp)
-        lay.addLayout(row_cfg)
+        cmp_row.addWidget(btn_clr)
+        lay.addLayout(cmp_row)
 
         return frame
 
@@ -283,6 +327,27 @@ class MainWindow(QMainWindow):
             self._view_group.addButton(btn)
             self._view_btns[mode] = btn
             vlay.addWidget(btn)
+
+        self._live_indicator = QLabel("")
+        self._live_indicator.setFixedWidth(128)
+        self._live_indicator.setStyleSheet(f"font-size:8pt; font-weight:bold; color:{C_SUB};")
+        vlay.addWidget(self._live_indicator)
+
+        vsep_vbar = QFrame()
+        vsep_vbar.setFrameShape(QFrame.Shape.VLine)
+        vsep_vbar.setStyleSheet(f"color:{C_BORDER};")
+        vlay.addWidget(vsep_vbar)
+        vlay.addWidget(self._lbl_small("Tipo señal:"))
+        self._live_type_combo = QComboBox()
+        self._live_type_combo.addItems(["Todos", "float", "int", "digital"])
+        self._live_type_combo.setFixedWidth(80)
+        vlay.addWidget(self._live_type_combo)
+        vlay.addWidget(self._lbl_small("ID hex:"))
+        self._live_id_edit = QLineEdit()
+        self._live_id_edit.setPlaceholderText("ej. 0011")
+        self._live_id_edit.setFixedWidth(110)
+        vlay.addWidget(self._live_id_edit)
+
         hint = QLabel("   Ctrl+clic para comparar")
         hint.setObjectName("subtext")
         vlay.addWidget(hint)
@@ -485,9 +550,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_mouse_press(self, event):
-        if self._view != "individual" or event.inaxes is None:
+        if self._view not in ("individual", "compare") or event.inaxes is None:
             return
-        if self._mark_mode:
+        if self._view == "individual" and self._mark_mode:
             if event.button == 1 and self._current_id is not None:
                 pts = self._markers.setdefault(self._current_id, [])
                 pts.append((event.xdata, event.ydata))
@@ -508,7 +573,7 @@ class MainWindow(QMainWindow):
             self._dragging = False
 
     def _on_mouse_move(self, event):
-        if self._view != "individual" or self._cursor_vline is None:
+        if self._view not in ("individual", "compare") or self._cursor_vline is None:
             return
         if self._dragging and self._drag_pixel_start is not None:
             if event.inaxes is None or not self._fig.axes:
@@ -551,7 +616,7 @@ class MainWindow(QMainWindow):
         self._canvas.draw_idle()
 
     def _on_scroll(self, event):
-        if self._view != "individual" or not self._fig.axes:
+        if self._view not in ("individual", "compare") or not self._fig.axes:
             return
         # Factor de cambio basado en dirección del scroll
         if event.button == 'up':
@@ -628,12 +693,13 @@ class MainWindow(QMainWindow):
 
     def _start_live(self):
         iface = self._iface_combo.currentText()
-        self._live_signals  = {}
-        self._live_tcp_bufs = {}
-        self._live_t0       = 0.0
+        self._live_signals     = {}
+        self._live_tcp_bufs    = {}
+        self._live_t0          = 0.0
+        self._live_raw_packets = []
 
         self._live_thread = QThread()
-        self._live_worker = LiveCaptureWorker(self._tshark, iface)
+        self._live_worker = LiveCaptureWorker(self._tshark, iface, "", "", "", "")
         self._live_worker.moveToThread(self._live_thread)
         self._live_thread.started.connect(self._live_worker.run)
         self._live_worker.new_packet.connect(self._on_live_packet)
@@ -646,8 +712,10 @@ class MainWindow(QMainWindow):
         self._live_timer.timeout.connect(self._update_live_plot)
         self._live_timer.start()
 
-        self._btn_live_start.setEnabled(False)
-        self._btn_live_stop.setEnabled(True)
+        self._act_live_start.setEnabled(False)
+        self._act_live_stop.setEnabled(True)
+        self._live_indicator.setText("⬤ capturando")
+        self._live_indicator.setStyleSheet("font-size:8pt; font-weight:bold; color:#60b060;")
         self._set_view("live")
         self._set_status(f"Capturando en {iface}...")
 
@@ -662,12 +730,26 @@ class MainWindow(QMainWindow):
             self._live_thread.quit()
             self._live_thread.wait(3000)
             self._live_thread = None
-        self._btn_live_start.setEnabled(True)
-        self._btn_live_stop.setEnabled(False)
-        self._live_status_lbl.setText("")
+        self._act_live_start.setEnabled(True)
+        self._act_live_stop.setEnabled(False)
+        self._live_indicator.setText("○ detenida")
+        self._live_indicator.setStyleSheet(f"font-size:8pt; font-weight:bold; color:{C_SUB};")
         n_sig = len(self._live_signals)
         n_pts = sum(v["n"] for v in self._live_signals.values())
-        self._set_status(f"Captura detenida — {n_sig} senales, {n_pts} muestras")
+        n_pkts = len(self._live_raw_packets)
+        self._set_status(
+            f"Captura detenida — {n_sig} senales, {n_pts} muestras, {n_pkts} paquetes raw"
+        )
+
+    def _clear_live_data(self):
+        self._live_signals     = {}
+        self._live_tcp_bufs    = {}
+        self._live_t0          = 0.0
+        self._live_raw_packets = []
+        self._set_status("Datos de captura borrados.")
+        if self._view == "live":
+            draw_empty(self._fig, "Datos borrados. Esperando nuevos paquetes...")
+            self._canvas.draw()
 
     def _on_live_packet(self, pkt):
         import numpy as np
@@ -676,9 +758,13 @@ class MainWindow(QMainWindow):
         if not self._live_t0:
             self._live_t0 = ts
 
+        # Acumular para exportación PCAP (máximo 100 000 paquetes ~ ~50 MB)
+        if len(self._live_raw_packets) < 100_000:
+            self._live_raw_packets.append(pkt)
+
         if pkt["transport"] == "UDP":
             _, entries = parse_raw_packet(pkt["payload"])
-            for sig_id, val, is_f, cat in entries:
+            for sig_id, val, is_f, cat, *_ in entries:
                 self._live_add(sig_id, val, is_f, cat, ts,
                                "UDP", pkt["ip_src"], pkt["ip_dst"])
         else:
@@ -690,13 +776,13 @@ class MainWindow(QMainWindow):
             buf = self._live_tcp_bufs.get(stream_key, b"") + chunk
             entries, buf = parse_tcp16_stream(buf)
             self._live_tcp_bufs[stream_key] = buf
-            for sig_id, val, is_f, cat in entries:
+            for sig_id, val, is_f, cat, *_ in entries:
                 self._live_add(sig_id, val, is_f, cat, ts,
                                "TCP", pkt["ip_src"], pkt["ip_dst"])
 
         n_sig = len(self._live_signals)
         n_pts = sum(v["n"] for v in self._live_signals.values())
-        self._live_status_lbl.setText(f"{n_sig} senales  ·  {n_pts} muestras")
+        self._set_status(f"Capturando...  {n_sig} senales  ·  {n_pts} muestras")
 
     def _live_add(self, sig_id, val, is_f, cat, ts, transport, ip_src, ip_dst):
         import numpy as np
@@ -725,11 +811,108 @@ class MainWindow(QMainWindow):
         self._stop_live()
         QMessageBox.critical(self, "Error en captura en vivo", msg)
 
+    def _save_live_pcap(self):
+        if not self._live_raw_packets:
+            QMessageBox.information(self, "Guardar PCAP",
+                                    "No hay paquetes capturados todavia.")
+            return
+        default_name = f"live_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar captura como PCAP", default_name,
+            "PCAP (*.pcap);;Todos (*.*)")
+        if not path:
+            return
+        try:
+            self._write_pcap_file(path, self._live_raw_packets)
+            n = len(self._live_raw_packets)
+            self._set_status(f"PCAP guardado: {n} paquetes → {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al guardar PCAP", str(e))
+
+    @staticmethod
+    def _write_pcap_file(path: str, packets: list):
+        import struct
+        import socket as _socket
+
+        def ip4(s):
+            try:
+                return _socket.inet_aton(s)
+            except Exception:
+                return b'\x00\x00\x00\x00'
+
+        with open(path, 'wb') as f:
+            # Global header (24 bytes): magic, ver_maj, ver_min, zone,
+            #                           sigfigs, snaplen, linktype=101 (raw IPv4)
+            f.write(struct.pack('<IHHiIII',
+                0xa1b2c3d4, 2, 4, 0, 0, 65535, 101))
+
+            for pkt in packets:
+                try:
+                    payload_bytes = bytes.fromhex(
+                        pkt['payload'].replace(':', '').replace(' ', ''))
+                except (ValueError, AttributeError, KeyError):
+                    continue
+
+                src_ip = ip4(pkt.get('ip_src') or '')
+                dst_ip = ip4(pkt.get('ip_dst') or '')
+                try:
+                    sp = int(pkt.get('src_port') or 0)
+                    dp = int(pkt.get('dst_port') or 0)
+                except (ValueError, TypeError):
+                    sp = dp = 0
+
+                transport = pkt.get('transport', 'UDP')
+                if transport == 'UDP':
+                    proto_num = 17
+                    udp_len   = 8 + len(payload_bytes)
+                    l4 = struct.pack('>HHHH', sp, dp, udp_len, 0) + payload_bytes
+                else:
+                    proto_num = 6
+                    l4 = struct.pack('>HHIIBBHHH',
+                        sp, dp, 0, 0,   # ports, seq, ack
+                        0x50, 0x10,     # data offset=20, ACK flag
+                        65535, 0, 0,    # window, checksum, urgent
+                    ) + payload_bytes
+
+                ip_total = 20 + len(l4)
+                ip_hdr = struct.pack('>BBHHHBBH4s4s',
+                    0x45, 0, ip_total, 0, 0, 64, proto_num, 0, src_ip, dst_ip)
+
+                frame = ip_hdr + l4
+                ts     = pkt.get('ts', 0.0)
+                ts_sec = int(ts)
+                ts_us  = int((ts - ts_sec) * 1_000_000)
+                f.write(struct.pack('<IIII', ts_sec, ts_us,
+                                    len(frame), len(frame)))
+                f.write(frame)
+
     def _update_live_plot(self):
         if self._view != "live":
             return
+        ftype   = self._live_type_combo.currentText()
+        id_text   = self._live_id_edit.text().strip()
+        filter_ids = set()
+        for part in id_text.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    filter_ids.add(int(part, 16))
+                except ValueError:
+                    pass
         if self._live_signals:
-            draw_overview(self._fig, self._live_signals, self._live_t0)
+            sigs = self._live_signals
+            if ftype != "Todos":
+                sigs = {k: v for k, v in sigs.items() if sig_type(v) == ftype}
+            if filter_ids:
+                sigs = {k: v for k, v in sigs.items()
+                        if v["signal_id"] in filter_ids}
+            n_sig = len(self._live_signals)
+            n_pts = sum(v["n"] for v in self._live_signals.values())
+            self._live_indicator.setText(f"⬤ {n_sig} sen · {n_pts} pts")
+            if sigs:
+                draw_overview(self._fig, sigs, self._live_t0)
+            else:
+                draw_empty(self._fig, "Sin senales que coincidan con los filtros.")
         else:
             draw_empty(self._fig, "Esperando paquetes...")
         self._canvas.draw()
@@ -751,18 +934,12 @@ class MainWindow(QMainWindow):
                 f"No se encontró tshark en: {self._tshark}\n\n{hint}"
             )
 
-    def _browse_pcap(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "Selecciona PCAP", "", "PCAP (*.pcap *.pcapng);;Todos (*.*)")
-        if p:
-            self._pcap_edit.setText(p)
-
     def _set_status(self, msg):
         self._status_lbl.setText(msg)
 
     def _set_busy(self, busy):
         self._progress.setVisible(busy)
-        self._btn_analyze.setEnabled(not busy)
+        self._act_open_analyze.setEnabled(not busy)
 
     # ── Vistas ────────────────────────────────────────────────────────────────
 
@@ -793,12 +970,18 @@ class MainWindow(QMainWindow):
                 draw_empty(self._fig, "Haz clic en una senal de la lista para verla aqui.")
         elif m == "compare":
             draw_compare(self._fig, self._compare_ids, self._signals, self._t0)
+            if self._fig.axes:
+                ax = self._fig.axes[0]
+                self._apply_view_transforms(list(ax.get_xlim()), list(ax.get_ylim()))
+                self._setup_cursor()
         elif m == "live":
-            if self._live_signals:
+            if self._live_timer is None:
+                draw_empty(self._fig, "Captura en vivo no activa.\nUsa  Captura en vivo → Iniciar captura  (Ctrl+R).")
+            elif self._live_signals:
                 draw_overview(self._fig, self._live_signals, self._live_t0)
             else:
                 draw_empty(self._fig, "Esperando paquetes...")
-        self._ind_controls.setVisible(m == "individual")
+        self._ind_controls.setVisible(m in ("individual", "compare"))
         self._canvas.draw()
 
     def _apply_view_transforms(self, xlim, ylim):
@@ -864,43 +1047,288 @@ class MainWindow(QMainWindow):
         if self._view == "compare":
             self._refresh()
 
+    def _on_tree_context_menu(self, pos):
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        sid = item.data(0, Qt.ItemDataRole.UserRole)
+        if sid is None:
+            return
+        menu = QMenu(self)
+        fk = self._fav_key(sid)
+        is_fav = fk in self._favorites
+        act_fav    = menu.addAction("Quitar de favoritos ★" if is_fav else "Agregar a favoritos ★")
+        menu.addSeparator()
+        act_rename = menu.addAction("Renombrar señal...")
+        act_note   = menu.addAction("Editar nota...")
+        menu.addSeparator()
+        act_frame  = menu.addAction("Ver trama...")
+        act_csv    = menu.addAction("Exportar tramas a CSV...")
+        menu.addSeparator()
+        in_cmp  = sid in self._compare_ids
+        act_cmp = menu.addAction("Quitar de comparacion" if in_cmp else "Agregar a comparacion")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == act_fav:
+            self._toggle_favorite(sid)
+        elif chosen == act_rename:
+            self._rename_signal_dialog(sid)
+        elif chosen == act_note:
+            self._edit_note_dialog(sid)
+        elif chosen == act_frame:
+            self._show_frame_dialog(sid)
+        elif chosen == act_csv:
+            self._current_id = sid
+            self._export_signal_csv()
+        elif chosen == act_cmp:
+            if in_cmp:
+                self._compare_ids.remove(sid)
+            else:
+                self._compare_ids.append(sid)
+            self._cmp_lbl.setText(f"Comparando: {len(self._compare_ids)} senal(es)")
+            self._set_view("compare")
+
+    @staticmethod
+    def _frame_bytes_html(hex_str: str) -> str:
+        """Devuelve HTML con los bytes de la trama coloreados por campo."""
+        from .parser import _tcp_rec_size
+        try:
+            data = bytes.fromhex(hex_str.replace(' ', '').replace(':', ''))
+        except ValueError:
+            return f'<tt style="color:#f06060">{hex_str}</tt>'
+        if not data:
+            return ''
+
+        BS = ('font-family:Consolas,monospace;font-size:10.5pt;'
+              'padding:2px 5px;margin:1px;border-radius:3px;')
+
+        def span(b, bg, fg):
+            return (f'<span style="{BS}background:{bg};color:{fg}">'
+                    f'{b:02X}</span>')
+
+        parts = []
+
+        # ── Protocol B (TCP) ──────────────────────────────────────────────
+        if len(data) >= 12 and data[1:4] == b'\x00\x00\x00':
+            rs = _tcp_rec_size(data, 0)
+            if rs and len(data) >= rs:
+                for i in range(4):
+                    parts.append(span(data[i], '#161616', '#505050'))          # SYNC
+                for i in range(4, 8):
+                    parts.append(span(data[i], '#1a0830', '#b060e8'))          # SignalID
+                for i in range(8, 10):
+                    parts.append(span(data[i], '#001530', '#5090d8'))          # cat
+                parts.append(span(data[10], '#001800', '#40c040'))             # data_len
+                st_fg = '#e04040' if data[11] == 0x57 else '#f0a830'
+                parts.append(span(data[11], '#1e1000', st_fg))                 # status
+                for i in range(12, min(rs, len(data))):
+                    parts.append(span(data[i], '#200a0a', '#e07060'))          # Value
+                return ' '.join(parts)
+
+        # ── Protocol A (UDP TLV single block) ─────────────────────────────
+        if len(data) >= 8 and data[0] == 0x01 and data[2] >= 5:
+            dlen       = data[2]
+            block_size = 4 + ((dlen + 3) // 4) * 4
+            if len(data) >= block_size:
+                parts.append(span(data[0], '#1e1600', '#e8b830'))              # tipo
+                parts.append(span(data[1], '#001530', '#5090d8'))              # cat
+                parts.append(span(data[2], '#001800', '#40c040'))              # dlen
+                parts.append(span(data[3], '#141414', '#383838'))              # pad
+                for i in range(4, 8):
+                    parts.append(span(data[i], '#1a0830', '#b060e8'))          # SignalID
+                vsize = dlen - 4
+                for i in range(8, 8 + vsize):
+                    parts.append(span(data[i], '#200a0a', '#e07060'))          # Value
+                for i in range(8 + vsize, block_size):
+                    parts.append(span(data[i], '#141414', '#383838'))          # alineado
+                return ' '.join(parts)
+
+        # ── Desconocido ───────────────────────────────────────────────────
+        for b in data:
+            parts.append(span(b, '#1a1a1a', '#808080'))
+        return ' '.join(parts)
+
+    @staticmethod
+    def _frame_legend_html(hex_str: str) -> str:
+        """Leyenda de colores según el protocolo detectado."""
+        from .parser import _tcp_rec_size
+        try:
+            data = bytes.fromhex(hex_str.replace(' ', '').replace(':', ''))
+        except ValueError:
+            return ''
+        LS = 'font-size:8pt;padding:1px 6px;margin:1px;border-radius:3px;'
+
+        def tag(label, bg, fg):
+            return f'<span style="{LS}background:{bg};color:{fg}">{label}</span>'
+
+        if len(data) >= 12 and data[1:4] == b'\x00\x00\x00':
+            rs = _tcp_rec_size(data, 0)
+            if rs:
+                return ('&nbsp;'.join([
+                    tag('SYNC', '#161616', '#505050'),
+                    tag('SignalID', '#1a0830', '#b060e8'),
+                    tag('cat', '#001530', '#5090d8'),
+                    tag('data_len', '#001800', '#40c040'),
+                    tag('status', '#1e1000', '#f0a830'),
+                    tag('Value', '#200a0a', '#e07060'),
+                ]) + '&nbsp;&nbsp;<span style="font-size:8pt;color:#505050">Protocolo B — TCP</span>')
+
+        if len(data) >= 8 and data[0] == 0x01 and data[2] >= 5:
+            return ('&nbsp;'.join([
+                tag('tipo', '#1e1600', '#e8b830'),
+                tag('cat', '#001530', '#5090d8'),
+                tag('dlen', '#001800', '#40c040'),
+                tag('pad', '#141414', '#505050'),
+                tag('SignalID', '#1a0830', '#b060e8'),
+                tag('Value', '#200a0a', '#e07060'),
+            ]) + '&nbsp;&nbsp;<span style="font-size:8pt;color:#505050">Protocolo A — UDP TLV</span>')
+
+        return ''
+
+    def _show_frame_dialog(self, sid):
+        from .parser import decode_frame_explanation
+        if sid not in self._signals:
+            return
+        info     = self._signals[sid]
+        payloads = info.get("payloads", [])
+        if not payloads:
+            QMessageBox.information(self, "Ver trama",
+                                    "Esta señal no tiene tramas almacenadas.")
+            return
+        sig_id   = info["signal_id"]
+        ts_list  = info["ts"]
+        val_list = info["val"]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Tramas — Señal 0x{sig_id:04X}  ({sig_id})")
+        dlg.resize(760, 600)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(5)
+
+        hdr = QLabel(
+            f"<b>0x{sig_id:04X}</b>&nbsp;&nbsp;·&nbsp;&nbsp;"
+            f"{info.get('transport','')}  "
+            f"{info.get('ip_src','')} → {info.get('ip_dst','')}  "
+            f"·  {len(payloads)} tramas"
+        )
+        hdr.setObjectName("subtext")
+        hdr.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(hdr)
+
+        # ── Lista de muestras ─────────────────────────────────────────────
+        lst = QListWidget()
+        lst.setFont(QFont("Consolas", 9))
+        lst.setMaximumHeight(160)
+        for i, (ts, val, raw) in enumerate(zip(ts_list, val_list, payloads)):
+            t_rel   = ts - self._t0
+            val_str = f"{val:.6g}" if info["is_float"] else str(val)
+            n_bytes = len(raw.replace(" ", "")) // 2
+            lst.addItem(
+                f"[{i+1:4d}]  t=+{t_rel:10.3f}s   val={val_str:<14}  ({n_bytes} B)")
+        lay.addWidget(lst)
+
+        # ── Visualización de bytes coloreados ─────────────────────────────
+        from PyQt6.QtWidgets import QTextEdit
+        hex_view = QTextEdit()
+        hex_view.setReadOnly(True)
+        hex_view.setMaximumHeight(58)
+        hex_view.setFont(QFont("Consolas", 10))
+        hex_view.setStyleSheet(
+            f"background:{C_INPUT};border:1px solid {C_BORDER};"
+            "border-radius:4px;padding:4px;")
+        lay.addWidget(hex_view)
+
+        # ── Leyenda ───────────────────────────────────────────────────────
+        legend_lbl = QLabel()
+        legend_lbl.setTextFormat(Qt.TextFormat.RichText)
+        legend_lbl.setContentsMargins(2, 0, 2, 2)
+        lay.addWidget(legend_lbl)
+
+        # ── Explicación texto ─────────────────────────────────────────────
+        txt = QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setFont(QFont("Consolas", 9))
+        lay.addWidget(txt, 1)
+
+        def on_select(row):
+            if 0 <= row < len(payloads):
+                raw = payloads[row]
+                hex_view.setHtml(
+                    f'<div style="margin:2px">{self._frame_bytes_html(raw)}</div>')
+                legend_lbl.setText(self._frame_legend_html(raw))
+                txt.setPlainText(decode_frame_explanation(raw))
+
+        lst.currentRowChanged.connect(on_select)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        lst.setCurrentRow(0)
+        dlg.exec()
+
+    def _rename_signal_dialog(self, sid):
+        fk = self._fav_key(sid)
+        if fk not in self._favorites:
+            self._favorites[fk] = {"name": "", "note": ""}
+        current = self._favorites[fk].get("name", "")
+        name, ok = QInputDialog.getText(
+            self, "Renombrar señal", "Nombre:", text=current)
+        if ok:
+            self._favorites[fk]["name"] = name
+            self._save_favorites()
+            self._populate_tree()
+            if sid == self._current_id:
+                self._update_detail(sid)
+
+    def _edit_note_dialog(self, sid):
+        fk = self._fav_key(sid)
+        if fk not in self._favorites:
+            self._favorites[fk] = {"name": "", "note": ""}
+        current = self._favorites[fk].get("note", "")
+        note, ok = QInputDialog.getMultiLineText(
+            self, "Editar nota", "Nota:", current)
+        if ok:
+            self._favorites[fk]["note"] = note
+            self._save_favorites()
+            self._populate_tree()
+            if sid == self._current_id:
+                self._update_detail(sid)
+
     def _update_detail(self, sid):
         if sid not in self._signals:
             return
         info   = self._signals[sid]
         int_id = info["signal_id"]
-        self._detail.setPlainText(
-            f"ID:       0x{int_id:04X}  ({int_id})\n"
-            f"Tipo:     {sig_type(info)}\n"
-            f"Protocolo:{info.get('transport','')}\n"
-            f"Origen:   {info.get('ip_src','')}\n"
-            f"Destino:  {info.get('ip_dst','')}\n"
-            f"N:        {info['n']} muestras\n"
-            f"Min:      {info['min']:.5g}\n"
-            f"Max:      {info['max']:.5g}\n"
-            f"Sigma:    {info['std']:.4g}\n"
-            f"Rango:    {info['range']:.4g}"
-        )
-        # Señales con serie temporal idéntica
+        fk     = self._fav_key(sid)
+        name   = self._favorites.get(fk, {}).get("name", "")
+        note   = self._favorites.get(fk, {}).get("note", "")
+        lines = [
+            f"ID:       0x{int_id:04X}  ({int_id})",
+            f"Tipo:     {sig_type(info)}",
+            f"Protocolo:{info.get('transport','')}",
+            f"Origen:   {info.get('ip_src','')}",
+            f"Destino:  {info.get('ip_dst','')}",
+            f"N:        {info['n']} muestras",
+            f"Min:      {info['min']:.5g}",
+            f"Max:      {info['max']:.5g}",
+            f"Sigma:    {info['std']:.4g}",
+            f"Rango:    {info['range']:.4g}",
+        ]
+        if name:
+            lines.insert(0, f"Nombre:   {name}")
+        if note:
+            lines.append(f"\nNota:\n{note}")
+        self._detail.setPlainText('\n'.join(lines))
         gemelas = self._duplicates.get(sid, [])
         if gemelas:
-            lines = ["\nSENALES IDENTICAS:"]
+            extra = ["\nSENALES IDENTICAS:"]
             for g in gemelas[:8]:
-                lines.append(f"  0x{g[0]:04X}  {g[1]}  {g[2]}->{g[3]}")
+                extra.append(f"  0x{g[0]:04X}  {g[1]}  {g[2]}->{g[3]}")
             if len(gemelas) > 8:
-                lines.append(f"  ... ({len(gemelas)-8} mas)")
-            self._detail.appendPlainText('\n'.join(lines))
-
-        fk  = self._fav_key(sid)
-        fav = fk in self._favorites
-        self._note_frame.setVisible(fav)
-        if fav:
-            self._note_name.blockSignals(True)
-            self._note_body.blockSignals(True)
-            self._note_name.setText(self._favorites[fk].get("name", ""))
-            self._note_body.setPlainText(self._favorites[fk].get("note", ""))
-            self._note_name.blockSignals(False)
-            self._note_body.blockSignals(False)
+                extra.append(f"  ... ({len(gemelas)-8} mas)")
+            self._detail.appendPlainText('\n'.join(extra))
 
     def _populate_tree(self):
         self._tree.clear()
@@ -908,7 +1336,13 @@ class MainWindow(QMainWindow):
             return
         search   = self._search.text().strip().lower()
         only_var = self._only_var.isChecked()
-        # Favoritos primero, luego por variabilidad descendente
+        proto_f  = self._proto_combo.currentText()
+        src_f    = self._src_combo.currentText().strip()
+        dst_f    = self._dst_combo.currentText().strip()
+        if src_f in ("", "(todas)"):
+            src_f = ""
+        if dst_f in ("", "(todas)"):
+            dst_f = ""
         ranked = sorted(
             self._signals.items(),
             key=lambda x: (self._fav_key(x[0]) not in self._favorites,
@@ -920,6 +1354,12 @@ class MainWindow(QMainWindow):
             proto  = info.get("transport", "")
             src    = info.get("ip_src", "")
             dst    = info.get("ip_dst", "")
+            if proto_f not in ("Todos", "") and proto != proto_f:
+                continue
+            if src_f and src != src_f:
+                continue
+            if dst_f and dst != dst_f:
+                continue
             if search and not any(search in s.lower() for s in [hex_id, t, proto, src, dst]):
                 continue
             if only_var and info["range"] == 0:
@@ -1002,43 +1442,180 @@ class MainWindow(QMainWindow):
         if sid == self._current_id:
             self._update_detail(sid)
 
-    def _build_note_editor(self):
-        frame = QFrame()
-        lay = QVBoxLayout(frame)
-        lay.setContentsMargins(0, 4, 0, 0)
-        lay.setSpacing(3)
-        lay.addWidget(self._sep())
-        lay.addWidget(self._lbl("NOMBRE / NOTA"))
-        self._note_name = QLineEdit()
-        self._note_name.setPlaceholderText("Nombre de la senal...")
-        self._note_name.textChanged.connect(self._save_fav_note)
-        lay.addWidget(self._note_name)
-        self._note_body = QPlainTextEdit()
-        self._note_body.setPlaceholderText("Notas adicionales...")
-        self._note_body.setMaximumHeight(70)
-        self._note_body.setFont(QFont("Consolas", 9))
-        self._note_body.textChanged.connect(self._save_fav_note)
-        lay.addWidget(self._note_body)
-        return frame
-
-    def _save_fav_note(self):
-        sid = self._current_id
-        if sid is None:
-            return
-        fk = self._fav_key(sid)
-        if fk not in self._favorites:
-            return
-        self._favorites[fk]["name"] = self._note_name.text()
-        self._favorites[fk]["note"] = self._note_body.toPlainText()
-        self._save_favorites()
-        for i in range(self._tree.topLevelItemCount()):
-            it = self._tree.topLevelItem(i)
-            if it.data(0, Qt.ItemDataRole.UserRole) == sid:
-                it.setText(1, self._note_name.text())
-                it.setToolTip(1, self._note_body.toPlainText())
-                break
-
     # ── Exportar / Importar nombres ───────────────────────────────────────────
+
+    def _export_signal_csv(self):
+        if self._current_id is None or self._current_id not in self._signals:
+            QMessageBox.information(self, "Exportar CSV",
+                                    "Selecciona una señal en la lista primero.")
+            return
+        info   = self._signals[self._current_id]
+        sig_id = info["signal_id"]
+        default_name = f"senal_0x{sig_id:04X}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar tramas a CSV", default_name,
+            "CSV (*.csv);;Todos (*.*)")
+        if not path:
+            return
+        try:
+            import csv
+            payloads = info.get("payloads", [])
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "N", "timestamp_epoch", "tiempo_relativo_s",
+                    "ip_src", "ip_dst", "transporte", "valor", "trama_hex",
+                ])
+                for i, (ts, val) in enumerate(zip(info["ts"], info["val"]), 1):
+                    raw = payloads[i - 1] if i - 1 < len(payloads) else ""
+                    writer.writerow([
+                        i,
+                        f"{ts:.6f}",
+                        f"{ts - self._t0:.6f}",
+                        info.get("ip_src", ""),
+                        info.get("ip_dst", ""),
+                        info.get("transport", ""),
+                        val,
+                        raw,
+                    ])
+            n = len(info["ts"])
+            self._set_status(
+                f"CSV exportado: señal 0x{sig_id:04X} — {n} tramas → {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al exportar CSV", str(e))
+
+    def _export_signals_visible_csv(self):
+        """Exporta todas las señales visibles en el árbol (con los filtros actuales)."""
+        if not self._signals:
+            QMessageBox.information(self, "Exportar", "No hay señales. Analiza un PCAP primero.")
+            return
+        visible_keys = []
+        for i in range(self._tree.topLevelItemCount()):
+            sid = self._tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            if sid is not None:
+                visible_keys.append(sid)
+        if not visible_keys:
+            QMessageBox.information(self, "Exportar",
+                                    "No hay señales visibles con los filtros actuales.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar señales visibles a CSV",
+            f"senales_{len(visible_keys)}.csv",
+            "CSV (*.csv);;Todos (*.*)")
+        if not path:
+            return
+        try:
+            import csv
+            rows = []
+            for sid in visible_keys:
+                info = self._signals[sid]
+                payloads = info.get("payloads", [])
+                for i, (ts, val) in enumerate(zip(info["ts"], info["val"])):
+                    raw = payloads[i] if i < len(payloads) else ""
+                    rows.append((ts, info["signal_id"], val, raw,
+                                 info.get("ip_src", ""), info.get("ip_dst", ""),
+                                 info.get("transport", "")))
+            rows.sort(key=lambda r: r[0])
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "N", "signal_id", "timestamp_epoch", "tiempo_relativo_s",
+                    "ip_src", "ip_dst", "transporte", "valor", "trama_hex",
+                ])
+                for n, (ts, sig_id, val, raw, ip_src, ip_dst, transport) in enumerate(rows, 1):
+                    writer.writerow([
+                        n, f"0x{sig_id:04X}",
+                        f"{ts:.6f}", f"{ts - self._t0:.6f}",
+                        ip_src, ip_dst, transport, val, raw,
+                    ])
+            self._set_status(
+                f"CSV exportado: {len(visible_keys)} señales, {len(rows)} muestras → {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al exportar CSV", str(e))
+
+    def _export_packets_csv(self):
+        """Exporta paquetes raw con filtro de protocolo e IP."""
+        if not self._packets:
+            QMessageBox.information(self, "Exportar",
+                                    "No hay paquetes. Analiza un PCAP primero.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Exportar paquetes a CSV")
+        dlg.setMinimumWidth(320)
+        dlg_lay = QVBoxLayout(dlg)
+        form = QHBoxLayout()
+        form.setSpacing(6)
+        proto_c = QComboBox()
+        proto_c.addItems(["Todos", "UDP", "TCP"])
+        proto_c.setFixedWidth(72)
+        form.addWidget(QLabel("Proto:"))
+        form.addWidget(proto_c)
+        form.addWidget(QLabel("Orig:"))
+        src_e = QLineEdit()
+        src_e.setPlaceholderText("vacío = todos")
+        form.addWidget(src_e, 1)
+        form.addWidget(QLabel("→"))
+        dst_e = QLineEdit()
+        dst_e.setPlaceholderText("vacío = todos")
+        form.addWidget(dst_e, 1)
+        dlg_lay.addLayout(form)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        dlg_lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        proto_f = proto_c.currentText()
+        src_f   = src_e.text().strip()
+        dst_f   = dst_e.text().strip()
+        filtered = [p for p in self._packets
+                    if (proto_f in ("Todos", "") or p.get("transport") == proto_f)
+                    and (not src_f or p.get("ip_src") == src_f)
+                    and (not dst_f or p.get("ip_dst") == dst_f)]
+        if not filtered:
+            QMessageBox.information(self, "Exportar",
+                                    "Ningún paquete coincide con los filtros.")
+            return
+        parts = []
+        if proto_f not in ("Todos", ""):
+            parts.append(proto_f)
+        if src_f:
+            parts.append(f"src{src_f.replace('.', '_')}")
+        if dst_f:
+            parts.append(f"dst{dst_f.replace('.', '_')}")
+        default_name = "paquetes" + ("_" + "_".join(parts) if parts else "") + ".csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar paquetes a CSV", default_name,
+            "CSV (*.csv);;Todos (*.*)")
+        if not path:
+            return
+        try:
+            import csv
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "N", "timestamp_epoch", "tiempo_relativo_s",
+                    "ip_src", "ip_dst", "transporte",
+                    "src_port", "dst_port", "payload_hex",
+                ])
+                for n, pkt in enumerate(filtered, 1):
+                    ts = pkt.get("ts", 0.0)
+                    writer.writerow([
+                        n,
+                        f"{ts:.6f}",
+                        f"{ts - self._t0:.6f}",
+                        pkt.get("ip_src", ""),
+                        pkt.get("ip_dst", ""),
+                        pkt.get("transport", ""),
+                        pkt.get("src_port", ""),
+                        pkt.get("dst_port", ""),
+                        pkt.get("payload", ""),
+                    ])
+            self._set_status(f"CSV exportado: {len(filtered)} paquetes → {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al exportar CSV", str(e))
 
     def _export_names(self):
         if not self._favorites:
@@ -1097,23 +1674,15 @@ class MainWindow(QMainWindow):
 
     # ── Análisis ──────────────────────────────────────────────────────────────
 
-    def _on_analyze(self):
-        pcap = self._pcap_edit.text().strip()
-        if not pcap or not os.path.exists(pcap):
-            QMessageBox.warning(self, "Atencion", "Selecciona un archivo .pcap valido.")
+    def _start_analyze(self, pcap: str):
+        if not os.path.exists(pcap):
+            QMessageBox.warning(self, "Atencion", "Archivo .pcap no encontrado.")
             return
-        src = self._src_combo.currentText().strip()
-        dst = self._dst_combo.currentText().strip()
-        if src in ("", "(todas)"):
-            src = ""
-        if dst in ("", "(todas)"):
-            dst = ""
         self._set_status("Extrayendo paquetes con tshark...")
         self._set_busy(True)
         self._thread = QThread()
         self._worker = AnalysisWorker(
-            self._tshark, pcap,
-            self._proto_combo.currentText(), src, dst
+            self._tshark, pcap, "Todos", "", ""
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -1141,6 +1710,7 @@ class MainWindow(QMainWindow):
         self._src_combo.blockSignals(False)
         self._dst_combo.blockSignals(False)
 
+        self._packets    = pkts
         self._signals    = sigs
         self._t0         = t0
         self._duplicates = find_duplicate_groups(sigs)
@@ -1153,6 +1723,9 @@ class MainWindow(QMainWindow):
             f"{len(pkts)} paquetes  ·  {len(sigs)} senales  "
             f"·  {varying} con variacion  ·  {dur:.1f} s captura"
         )
+        self._act_export_csv.setEnabled(True)
+        self._act_export_visible.setEnabled(True)
+        self._act_export_pkts.setEnabled(True)
         self._populate_tree()
         self._set_view("overview")
 

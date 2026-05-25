@@ -54,7 +54,7 @@ def _decode_value(data: bytes, offset: int, vsize: int):
 
 
 def parse_tlv_payload(payload: bytes) -> list:
-    """Extrae lista de (signal_id, valor, es_float, categoria) del payload TLV."""
+    """Extrae lista de (signal_id, valor, es_float, categoria, raw_hex) del payload TLV."""
     entries = []
     i = 0
     while i + 4 <= len(payload):
@@ -68,7 +68,8 @@ def parse_tlv_payload(payload: bytes) -> list:
             sig_id = struct.unpack_from('<I', payload, i + 4)[0]
             val, is_f = _decode_value(payload, i + 8, dlen - 4)
             if val is not None:
-                entries.append((sig_id, val, is_f, cat))
+                raw = payload[i:i + block].hex(' ')
+                entries.append((sig_id, val, is_f, cat, raw))
         i += block
     return entries
 
@@ -110,7 +111,8 @@ def parse_tcp16_payload(payload: bytes) -> list:
             if u32 != 0:
                 is_f = _is_plausible_float(f32)
                 val  = f32 if is_f else u32
-                entries.append((sig_id, val, is_f, cat))
+                raw  = payload[i:i + rec_size].hex(' ')
+                entries.append((sig_id, val, is_f, cat, raw))
             i += rec_size
         else:
             i += 1
@@ -142,7 +144,8 @@ def parse_tcp16_stream(buf: bytes):
             if u32 != 0:
                 is_f = _is_plausible_float(f32)
                 val  = f32 if is_f else u32
-                entries.append((sig_id, val, is_f, cat))
+                raw  = buf[i:i + rec_size].hex(' ')
+                entries.append((sig_id, val, is_f, cat, raw))
             i += rec_size
         else:
             i += 1

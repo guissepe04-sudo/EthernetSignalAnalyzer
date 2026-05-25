@@ -22,6 +22,7 @@ def analyze_signals(packets: list, transport_filter: str,
     """
     sig_ts      = defaultdict(list)
     sig_val     = defaultdict(list)
+    sig_payload = defaultdict(list)
     sig_float_n = defaultdict(int)   # votos a favor de float
     sig_int_n   = defaultdict(int)   # votos a favor de int
     sig_cat     = {}
@@ -44,10 +45,11 @@ def analyze_signals(packets: list, transport_filter: str,
         ver, entries = parse_raw_packet(pkt["payload"])
         if ver != 2:
             continue
-        for sig_id, val, is_f, cat in entries:
+        for sig_id, val, is_f, cat, raw in entries:
             key = (sig_id, "UDP", pkt["ip_src"], pkt["ip_dst"])
             sig_ts[key].append(pkt["ts"])
             sig_val[key].append(val)
+            sig_payload[key].append(raw)
             if is_f:
                 sig_float_n[key] += 1
             else:
@@ -73,10 +75,11 @@ def analyze_signals(packets: list, transport_filter: str,
                 continue
             buf += chunk
             entries, buf = parse_tcp16_stream(buf)
-            for sig_id, val, is_f, cat in entries:
+            for sig_id, val, is_f, cat, raw in entries:
                 key = (sig_id, "TCP", ip_src, ip_dst)
                 sig_ts[key].append(pkt["ts"])
                 sig_val[key].append(val)
+                sig_payload[key].append(raw)
                 if is_f:
                     sig_float_n[key] += 1
                 else:
@@ -99,6 +102,7 @@ def analyze_signals(packets: list, transport_filter: str,
             "signal_id": sig_id,
             "ts":        sig_ts[key],
             "val":       vals,
+            "payloads":  sig_payload[key],
             "is_float":  is_float,
             "cat":       sig_cat.get(key, 0),
             "min":       float(arr.min()),
