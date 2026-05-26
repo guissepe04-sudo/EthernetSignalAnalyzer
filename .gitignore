@@ -10,3 +10,4 @@ favorites.json
 *.pcap
 *.pcapng
 *.csv
+*.config
