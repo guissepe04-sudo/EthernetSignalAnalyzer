@@ -4,7 +4,6 @@ import socket
 import time
 import argparse
 import math
-import signal
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -445,48 +444,56 @@ def run_cli(args):
     print("Ctrl+C para detener.")
     print()
 
-    # restaurar handler de Ctrl+C (PyQt6 lo reemplaza al importarse)
-    signal.signal(signal.SIGINT, signal.default_int_handler)
-
+    import threading
+    stop_evt  = threading.Event()
     sock      = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    iteration = 0
-    BAR       = 25
+    BAR       = 20
 
-    try:
-        while True:
+    def _send_loop():
+        iteration = 0
+        while not stop_evt.is_set():
             t0_pcap = filtered[0][0]
             t0_real = time.perf_counter()
 
             for i, (ts, payload, *_, proto) in enumerate(filtered):
-                elapsed = ts - t0_pcap
-                t_pcap  = elapsed / args.speed
-                t_real  = time.perf_counter() - t0_real
-                wait    = t_pcap - t_real
+                if stop_evt.is_set():
+                    return
 
-                while wait > 0:
-                    time.sleep(min(0.05, wait))
-                    wait -= 0.05
+                elapsed = ts - t0_pcap
+                wait    = elapsed / args.speed - (time.perf_counter() - t0_real)
+                if wait > 0:
+                    if stop_evt.wait(timeout=wait):   # se despierta si stop_evt se setea
+                        return
 
                 try:
                     sock.sendto(payload, (args.ip, args.port))
                 except OSError as e:
-                    print(f"\nError enviando: {e}")
+                    print(f"\nError enviando: {e}", flush=True)
 
-                sigs    = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
-                sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
-                filled  = int(BAR * (i + 1) / total)
-                bar     = '█' * filled + '░' * (BAR - filled)
+                sigs     = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
+                sig_str  = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
+                if not sig_str:
+                    sig_str = f"[{proto} {len(payload)} bytes]"
+                filled   = int(BAR * (i + 1) / total)
+                bar      = '█' * filled + '░' * (BAR - filled)
                 loop_txt = f" [#{iteration + 1}]" if args.loop else ""
-                line    = f"\r[{bar}] {(i+1)/total*100:5.1f}% t={elapsed:.1f}s{loop_txt} | {sig_str}"
-                print(f"{line:<100}", end='', flush=True)
+                line     = f"\r[{bar}] {(i+1)/total*100:5.1f}% t={elapsed:.1f}s{loop_txt} | {sig_str}"
+                print(f"{line:<110}", end='', flush=True)
 
             print()
             if not args.loop:
-                break
+                return
             iteration += 1
             print(f"Reiniciando bucle #{iteration + 1}...")
 
+    t = threading.Thread(target=_send_loop, daemon=True)
+    t.start()
+
+    try:
+        t.join()
     except KeyboardInterrupt:
+        stop_evt.set()
+        t.join(timeout=1)
         print("\nDetenido.")
     finally:
         sock.close()
