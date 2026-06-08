@@ -2,6 +2,7 @@ import sys
 import struct
 import socket
 import time
+import argparse
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -349,9 +350,102 @@ class PcapPlayer(QWidget):
         self._worker = None
 
 
+def _filter_packets(packets, proto, src, dst):
+    result = []
+    for pkt in packets:
+        _, _, ip_src, ip_dst, p = pkt
+        if proto and proto.upper() not in ("TODOS", "") and p != proto.upper():
+            continue
+        if src and ip_src != src:
+            continue
+        if dst and ip_dst != dst:
+            continue
+        result.append(pkt)
+    return result
+
+
+def run_cli(args):
+    try:
+        packets = read_pcap(args.file)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    filtered = _filter_packets(packets, args.proto, args.src, args.dst)
+    if not filtered:
+        print("Ningún paquete coincide con los filtros.")
+        sys.exit(1)
+
+    total = len(filtered)
+    dur   = filtered[-1][0] - filtered[0][0] if total > 1 else 0
+    print(f"Archivo : {args.file}")
+    print(f"Paquetes: {total}  ·  Duración: {dur:.1f} s")
+    print(f"Destino : {args.ip}:{args.port}  ·  Velocidad: {args.speed}x  ·  Bucle: {args.loop}")
+    print()
+
+    sock      = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    iteration = 0
+    BAR       = 30
+
+    try:
+        while True:
+            t0_pcap = filtered[0][0]
+            t0_real = time.perf_counter()
+
+            for i, (ts, payload, *_) in enumerate(filtered):
+                elapsed = ts - t0_pcap
+                t_pcap  = elapsed / args.speed
+                t_real  = time.perf_counter() - t0_real
+                wait    = t_pcap - t_real
+                if wait > 0:
+                    time.sleep(wait)
+
+                try:
+                    sock.sendto(payload, (args.ip, args.port))
+                except OSError as e:
+                    print(f"\nError enviando: {e}")
+
+                filled   = int(BAR * (i + 1) / total)
+                bar      = '█' * filled + '░' * (BAR - filled)
+                loop_txt = f"  [bucle #{iteration + 1}]" if args.loop else ""
+                print(f"\r[{bar}] {(i+1)/total*100:5.1f}%  {i+1}/{total}  t={elapsed:.1f}s{loop_txt}",
+                      end='', flush=True)
+
+            print()
+            if not args.loop:
+                break
+            iteration += 1
+            print(f"Reiniciando bucle #{iteration + 1}...")
+
+    except KeyboardInterrupt:
+        print("\nDetenido.")
+    finally:
+        sock.close()
+
+    print("Reproducción finalizada.")
+
+
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    win = PcapPlayer()
-    win.show()
-    sys.exit(app.exec())
+    parser = argparse.ArgumentParser(
+        description="PCAP Player — sin argumentos abre la GUI",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("file",          nargs="?",           help="Archivo .pcap a reproducir")
+    parser.add_argument("--ip",          default="127.0.0.1", help="IP destino        (default: 127.0.0.1)")
+    parser.add_argument("--port",        default=3460, type=int, help="Puerto destino  (default: 3460)")
+    parser.add_argument("--speed",       default=1.0,  type=float, help="Velocidad     (default: 1.0)")
+    parser.add_argument("--loop",        action="store_true", help="Repetir indefinidamente")
+    parser.add_argument("--proto",       default="",          help="Filtro protocolo: UDP | TCP")
+    parser.add_argument("--src",         default="",          help="Filtro IP origen")
+    parser.add_argument("--dst",         default="",          help="Filtro IP destino")
+
+    args = parser.parse_args()
+
+    if args.file:
+        run_cli(args)
+    else:
+        app = QApplication(sys.argv)
+        app.setStyle("Fusion")
+        win = PcapPlayer()
+        win.show()
+        sys.exit(app.exec())
