@@ -445,63 +445,53 @@ def run_cli(args):
     print("Ctrl+C para detener.")
     print()
 
-    _stop = False
-
-    def _sigint(_sig, _frame):
-        nonlocal _stop
-        _stop = True
-
-    signal.signal(signal.SIGINT, _sigint)
+    # restaurar handler de Ctrl+C (PyQt6 lo reemplaza al importarse)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     sock      = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     iteration = 0
     BAR       = 25
 
-    while True:
-        t0_pcap = filtered[0][0]
-        t0_real = time.perf_counter()
+    try:
+        while True:
+            t0_pcap = filtered[0][0]
+            t0_real = time.perf_counter()
 
-        for i, (ts, payload, ip_src, ip_dst, proto) in enumerate(filtered):
-            if _stop:
+            for i, (ts, payload, *_, proto) in enumerate(filtered):
+                elapsed = ts - t0_pcap
+                t_pcap  = elapsed / args.speed
+                t_real  = time.perf_counter() - t0_real
+                wait    = t_pcap - t_real
+
+                while wait > 0:
+                    time.sleep(min(0.05, wait))
+                    wait -= 0.05
+
+                try:
+                    sock.sendto(payload, (args.ip, args.port))
+                except OSError as e:
+                    print(f"\nError enviando: {e}")
+
+                sigs    = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
+                sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
+                filled  = int(BAR * (i + 1) / total)
+                bar     = '█' * filled + '░' * (BAR - filled)
+                loop_txt = f" [#{iteration + 1}]" if args.loop else ""
+                line    = f"\r[{bar}] {(i+1)/total*100:5.1f}% t={elapsed:.1f}s{loop_txt} | {sig_str}"
+                print(f"{line:<100}", end='', flush=True)
+
+            print()
+            if not args.loop:
                 break
+            iteration += 1
+            print(f"Reiniciando bucle #{iteration + 1}...")
 
-            elapsed = ts - t0_pcap
-            t_pcap  = elapsed / args.speed
-            t_real  = time.perf_counter() - t0_real
-            wait    = t_pcap - t_real
+    except KeyboardInterrupt:
+        print("\nDetenido.")
+    finally:
+        sock.close()
 
-            # sleep en chunks para responder a Ctrl+C sin delay
-            while wait > 0 and not _stop:
-                chunk = min(0.05, wait)
-                time.sleep(chunk)
-                wait -= chunk
-
-            if _stop:
-                break
-
-            try:
-                sock.sendto(payload, (args.ip, args.port))
-            except OSError as e:
-                print(f"\nError enviando: {e}")
-
-            # decodificar señales para mostrar en pantalla
-            sigs = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
-            sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
-
-            filled   = int(BAR * (i + 1) / total)
-            bar      = '█' * filled + '░' * (BAR - filled)
-            loop_txt = f" [#{iteration + 1}]" if args.loop else ""
-            line     = f"\r[{bar}] {(i+1)/total*100:5.1f}% t={elapsed:.1f}s{loop_txt} | {sig_str}"
-            print(f"{line:<100}", end='', flush=True)
-
-        print()
-        if _stop or not args.loop:
-            break
-        iteration += 1
-        print(f"Reiniciando bucle #{iteration + 1}...")
-
-    sock.close()
-    print("Detenido." if _stop else "Reproducción finalizada.")
+    print("Reproducción finalizada.")
 
 
 if __name__ == "__main__":
