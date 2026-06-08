@@ -3,6 +3,8 @@ import struct
 import socket
 import time
 import argparse
+import math
+import signal
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -350,6 +352,65 @@ class PcapPlayer(QWidget):
         self._worker = None
 
 
+def _val4_le(b: bytes):
+    f = struct.unpack_from('<f', b)[0]
+    return f if (not math.isnan(f) and not math.isinf(f) and 1e-3 < abs(f) < 1e7) \
+             else struct.unpack_from('<I', b)[0]
+
+def _val8_le(b: bytes):
+    f = struct.unpack_from('<d', b)[0]
+    return f if (not math.isnan(f) and not math.isinf(f)) \
+             else struct.unpack_from('<Q', b)[0]
+
+
+def decode_payload_udp(payload: bytes) -> list:
+    results = []
+    if len(payload) < 20:
+        return results
+    offset = 20
+    while offset + 4 <= len(payload):
+        tipo, cat, dlen = payload[offset], payload[offset + 1], payload[offset + 2]
+        block = 4 + ((dlen + 3) // 4) * 4
+        if block < 8:
+            break
+        if tipo == 0x01 and cat != 0x8F and dlen >= 5 and offset + 4 + dlen <= len(payload):
+            sid = struct.unpack_from('<I', payload, offset + 4)[0]
+            vb  = payload[offset + 8: offset + 4 + dlen]
+            vl  = dlen - 4
+            if   vl == 1: results.append((sid, vb[0]))
+            elif vl == 2: results.append((sid, struct.unpack_from('<H', vb)[0]))
+            elif vl == 4: results.append((sid, _val4_le(vb)))
+            elif vl == 8: results.append((sid, _val8_le(vb)))
+        offset += block
+    return results
+
+
+def decode_payload_tcp(payload: bytes) -> list:
+    results = []
+    offset = 0
+    while offset + 12 <= len(payload):
+        dlen   = payload[offset + 10]
+        status = payload[offset + 11]
+        rec    = 12 + max(4, ((dlen + 3) // 4) * 4)
+        if rec < 12:
+            break
+        if status != 0x57 and dlen > 0 and offset + 12 + dlen <= len(payload):
+            sid = struct.unpack_from('<I', payload, offset + 4)[0]
+            vb  = payload[offset + 12: offset + 12 + dlen]
+            if   dlen == 1: results.append((sid, vb[0]))
+            elif dlen == 2: results.append((sid, struct.unpack_from('>H', vb)[0]))
+            elif dlen == 4:
+                f = struct.unpack_from('>f', vb)[0]
+                results.append((sid, f if not math.isnan(f) and not math.isinf(f)
+                                      else struct.unpack_from('>I', vb)[0]))
+            elif dlen == 8:
+                f = struct.unpack_from('>d', vb)[0]
+                results.append((sid, f if not math.isnan(f) and not math.isinf(f)
+                                      else struct.unpack_from('>Q', vb)[0]))
+        offset += rec
+    return results
+
+
 def _filter_packets(packets, proto, src, dst):
     result = []
     for pkt in packets:
@@ -381,48 +442,66 @@ def run_cli(args):
     print(f"Archivo : {args.file}")
     print(f"Paquetes: {total}  ·  Duración: {dur:.1f} s")
     print(f"Destino : {args.ip}:{args.port}  ·  Velocidad: {args.speed}x  ·  Bucle: {args.loop}")
+    print("Ctrl+C para detener.")
     print()
+
+    _stop = False
+
+    def _sigint(_sig, _frame):
+        nonlocal _stop
+        _stop = True
+
+    signal.signal(signal.SIGINT, _sigint)
 
     sock      = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     iteration = 0
-    BAR       = 30
+    BAR       = 25
 
-    try:
-        while True:
-            t0_pcap = filtered[0][0]
-            t0_real = time.perf_counter()
+    while True:
+        t0_pcap = filtered[0][0]
+        t0_real = time.perf_counter()
 
-            for i, (ts, payload, *_) in enumerate(filtered):
-                elapsed = ts - t0_pcap
-                t_pcap  = elapsed / args.speed
-                t_real  = time.perf_counter() - t0_real
-                wait    = t_pcap - t_real
-                if wait > 0:
-                    time.sleep(wait)
-
-                try:
-                    sock.sendto(payload, (args.ip, args.port))
-                except OSError as e:
-                    print(f"\nError enviando: {e}")
-
-                filled   = int(BAR * (i + 1) / total)
-                bar      = '█' * filled + '░' * (BAR - filled)
-                loop_txt = f"  [bucle #{iteration + 1}]" if args.loop else ""
-                print(f"\r[{bar}] {(i+1)/total*100:5.1f}%  {i+1}/{total}  t={elapsed:.1f}s{loop_txt}",
-                      end='', flush=True)
-
-            print()
-            if not args.loop:
+        for i, (ts, payload, ip_src, ip_dst, proto) in enumerate(filtered):
+            if _stop:
                 break
-            iteration += 1
-            print(f"Reiniciando bucle #{iteration + 1}...")
 
-    except KeyboardInterrupt:
-        print("\nDetenido.")
-    finally:
-        sock.close()
+            elapsed = ts - t0_pcap
+            t_pcap  = elapsed / args.speed
+            t_real  = time.perf_counter() - t0_real
+            wait    = t_pcap - t_real
 
-    print("Reproducción finalizada.")
+            # sleep en chunks para responder a Ctrl+C sin delay
+            while wait > 0 and not _stop:
+                chunk = min(0.05, wait)
+                time.sleep(chunk)
+                wait -= chunk
+
+            if _stop:
+                break
+
+            try:
+                sock.sendto(payload, (args.ip, args.port))
+            except OSError as e:
+                print(f"\nError enviando: {e}")
+
+            # decodificar señales para mostrar en pantalla
+            sigs = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
+            sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
+
+            filled   = int(BAR * (i + 1) / total)
+            bar      = '█' * filled + '░' * (BAR - filled)
+            loop_txt = f" [#{iteration + 1}]" if args.loop else ""
+            line     = f"\r[{bar}] {(i+1)/total*100:5.1f}% t={elapsed:.1f}s{loop_txt} | {sig_str}"
+            print(f"{line:<100}", end='', flush=True)
+
+        print()
+        if _stop or not args.loop:
+            break
+        iteration += 1
+        print(f"Reiniciando bucle #{iteration + 1}...")
+
+    sock.close()
+    print("Detenido." if _stop else "Reproducción finalizada.")
 
 
 if __name__ == "__main__":
