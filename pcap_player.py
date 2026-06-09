@@ -221,7 +221,8 @@ def run_cli(args):
     t.start()
 
     try:
-        t.join()
+        while t.is_alive():
+            t.join(timeout=0.2)
     except KeyboardInterrupt:
         stop_evt.set()
         t.join(timeout=1)
