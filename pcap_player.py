@@ -167,6 +167,33 @@ def run_cli(args):
         print("Ningún paquete coincide con los filtros.")
         sys.exit(1)
 
+    # ── Filtro por Signal ID ──────────────────────────────────────────────
+    target_id = None
+    if args.id:
+        try:
+            target_id = int(args.id, 0)
+        except ValueError:
+            print(f"Error: ID inválido '{args.id}'. Usar hex (0x15F7) o decimal (5623).")
+            sys.exit(1)
+
+        pkts_with_id, values_found = [], []
+        for pkt in filtered:
+            _, payload, *_, proto = pkt
+            sigs = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
+            for sid, val in sigs:
+                if sid == target_id:
+                    pkts_with_id.append(pkt)
+                    values_found.append(val)
+                    break
+
+        if not pkts_with_id:
+            print(f"Signal ID 0x{target_id:04X} ({target_id}) no encontrado en el pcap.")
+            sys.exit(1)
+
+        print(f"Signal 0x{target_id:04X}: encontrado en {len(pkts_with_id)} / {len(filtered)} paquetes")
+        print(f"  min={min(values_found):.4g}  max={max(values_found):.4g}  último={values_found[-1]:.4g}")
+        filtered = pkts_with_id
+
     total = len(filtered)
     dur   = filtered[-1][0] - filtered[0][0] if total > 1 else 0
     print(f"Archivo : {args.file}")
@@ -200,10 +227,14 @@ def run_cli(args):
                 except OSError as e:
                     print(f"\nError enviando: {e}", flush=True)
 
-                sigs    = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
-                sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
-                if not sig_str:
-                    sig_str = f"[{proto} {len(payload)}b sin señales]"
+                sigs = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
+                if target_id is not None:
+                    val     = next((v for s, v in sigs if s == target_id), None)
+                    sig_str = f"0x{target_id:04X} = {val:.4g}" if val is not None else f"0x{target_id:04X} = -"
+                else:
+                    sig_str = "  ".join(f"0x{sid:04X}={val:.4g}" for sid, val in sigs[:4])
+                    if not sig_str:
+                        sig_str = f"[{proto} {len(payload)}b sin señales]"
 
                 filled   = int(BAR * (i + 1) / total)
                 bar      = '█' * filled + '░' * (BAR - filled)
@@ -248,6 +279,7 @@ def build_parser():
     parser.add_argument("--proto", default="",             help="Filtro protocolo: UDP | TCP")
     parser.add_argument("--src",   default="",             help="Filtro IP origen")
     parser.add_argument("--dst",   default="",             help="Filtro IP destino")
+    parser.add_argument("--id",    default=None,           help="Filtrar por Signal ID (hex: 0x15F7 o decimal: 5623)")
     return parser
 
 
