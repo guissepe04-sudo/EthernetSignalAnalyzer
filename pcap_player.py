@@ -1,4 +1,5 @@
 import sys
+import os
 import struct
 import socket
 import time
@@ -155,6 +156,44 @@ def filter_packets(packets, proto, src, dst) -> list:
 
 # ── CLI mode (no Qt) ──────────────────────────────────────────────────────────
 
+PID_FILE = "/tmp/PcapPlayer.pid"
+LOG_FILE = "/tmp/PcapPlayer.log"
+
+
+def daemonize(log_path):
+    """Fork al background, desconectar del terminal."""
+    pid = os.fork()
+    if pid > 0:
+        print(f"Corriendo en segundo plano. PID: {pid}")
+        print(f"Log: {log_path}")
+        print(f"Para detener: {sys.argv[0]} --stop")
+        sys.exit(0)
+
+    os.setsid()
+
+    with open(log_path, 'a') as log:
+        os.dup2(log.fileno(), sys.stdout.fileno())
+        os.dup2(log.fileno(), sys.stderr.fileno())
+
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
+def stop_daemon():
+    if not os.path.exists(PID_FILE):
+        print("No hay proceso en segundo plano.")
+        return
+    with open(PID_FILE) as f:
+        pid = int(f.read().strip())
+    try:
+        os.kill(pid, 15)
+        os.remove(PID_FILE)
+        print(f"Proceso {pid} detenido.")
+    except ProcessLookupError:
+        os.remove(PID_FILE)
+        print(f"Proceso {pid} ya no existe. PID file eliminado.")
+
+
 def run_cli(args):
     try:
         packets = read_pcap(args.file)
@@ -276,10 +315,13 @@ def build_parser():
     parser.add_argument("--port",  default=3460, type=int, help="Puerto destino  (default: 3460)")
     parser.add_argument("--speed", default=1.0, type=float,help="Velocidad       (default: 1.0)")
     parser.add_argument("--loop",  action="store_true",    help="Repetir indefinidamente")
-    parser.add_argument("--proto", default="",             help="Filtro protocolo: UDP | TCP")
-    parser.add_argument("--src",   default="",             help="Filtro IP origen")
-    parser.add_argument("--dst",   default="",             help="Filtro IP destino")
-    parser.add_argument("--id",    default=None,           help="Filtrar por Signal ID (hex: 0x15F7 o decimal: 5623)")
+    parser.add_argument("--proto",  default="",             help="Filtro protocolo: UDP | TCP")
+    parser.add_argument("--src",    default="",             help="Filtro IP origen")
+    parser.add_argument("--dst",    default="",             help="Filtro IP destino")
+    parser.add_argument("--id",     default=None,           help="Filtrar por Signal ID (hex: 0x15F7 o decimal: 5623)")
+    parser.add_argument("--daemon", action="store_true",    help="Correr en segundo plano (no muere al cerrar terminal)")
+    parser.add_argument("--stop",   action="store_true",    help="Detener proceso en segundo plano")
+    parser.add_argument("--log",    default=LOG_FILE,       help=f"Archivo de log en modo daemon (default: {LOG_FILE})")
     return parser
 
 
@@ -288,7 +330,13 @@ def build_parser():
 if __name__ == "__main__":
     args = build_parser().parse_args()
 
+    if args.stop:
+        stop_daemon()
+        sys.exit(0)
+
     if args.file:
+        if args.daemon:
+            daemonize(args.log)
         # CLI mode — Qt nunca se importa, Ctrl+C funciona normalmente
         run_cli(args)
         sys.exit(0)
