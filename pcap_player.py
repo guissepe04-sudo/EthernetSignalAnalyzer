@@ -237,7 +237,7 @@ def run_cli(args):
     dur   = filtered[-1][0] - filtered[0][0] if total > 1 else 0
     print(f"Archivo : {args.file}")
     print(f"Paquetes: {total}  ·  Duración: {dur:.1f} s")
-    print(f"Destino : {args.ip}:{args.port}  ·  Velocidad: {args.speed}x  ·  Bucle: {args.loop}")
+    print(f"Destino : {', '.join(args.ip)}:{args.port}  ·  Velocidad: {args.speed}x  ·  Bucle: {args.loop}")
     print("Presiona Ctrl+C para detener.")
     print()
 
@@ -261,10 +261,11 @@ def run_cli(args):
                     if stop_evt.wait(timeout=wait):
                         return
 
-                try:
-                    sock.sendto(payload, (args.ip, args.port))
-                except OSError as e:
-                    print(f"\nError enviando: {e}", flush=True)
+                for ip in args.ip:
+                    try:
+                        sock.sendto(payload, (ip, args.port))
+                    except OSError as e:
+                        print(f"\nError enviando a {ip}: {e}", flush=True)
 
                 sigs = decode_payload_udp(payload) if proto == "UDP" else decode_payload_tcp(payload)
                 if target_id is not None:
@@ -311,7 +312,7 @@ def build_parser():
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("file",    nargs="?",              help="Archivo .pcap a reproducir")
-    parser.add_argument("--ip",    default="127.0.0.1",    help="IP destino      (default: 127.0.0.1)")
+    parser.add_argument("--ip",    default=["127.0.0.1"], nargs="+", help="IP(s) destino, puede ser más de una (ej: --ip 192.168.2.20 192.168.2.30)")
     parser.add_argument("--port",  default=3460, type=int, help="Puerto destino  (default: 3460)")
     parser.add_argument("--speed", default=1.0, type=float,help="Velocidad       (default: 1.0)")
     parser.add_argument("--loop",  action="store_true",    help="Repetir indefinidamente")
